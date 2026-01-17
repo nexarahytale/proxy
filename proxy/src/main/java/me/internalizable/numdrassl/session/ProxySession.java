@@ -2,256 +2,106 @@ package me.internalizable.numdrassl.session;
 
 import com.hypixel.hytale.protocol.Packet;
 import com.hypixel.hytale.protocol.packets.connection.Connect;
+import com.hypixel.hytale.protocol.packets.interface_.ChatMessage;
+import io.netty.buffer.ByteBuf;
 import io.netty.incubator.codec.quic.QuicChannel;
 import io.netty.incubator.codec.quic.QuicStreamChannel;
+import me.internalizable.numdrassl.auth.CertificateExtractor;
 import me.internalizable.numdrassl.config.BackendServer;
-import me.internalizable.numdrassl.server.ProxyServer;
+import me.internalizable.numdrassl.server.ProxyCore;
+import me.internalizable.numdrassl.session.auth.SessionAuthState;
+import me.internalizable.numdrassl.session.channel.PacketSender;
+import me.internalizable.numdrassl.session.channel.SessionChannels;
+import me.internalizable.numdrassl.session.identity.PlayerIdentity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.security.cert.X509Certificate;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-import me.internalizable.numdrassl.auth.CertificateExtractor;
-
 /**
  * Represents a proxy session for a connected Hytale client.
- * Manages both the downstream (client) and upstream (backend server) connections.
+ *
+ * <p>A session manages the bidirectional connection between a Hytale client
+ * and a backend server, handling authentication, packet routing, and server transfers.</p>
+ *
+ * <p>This class coordinates several focused components:</p>
+ * <ul>
+ *   <li>{@link PlayerIdentity} - Immutable player information</li>
+ *   <li>{@link SessionChannels} - QUIC channel management</li>
+ *   <li>{@link SessionAuthState} - Authentication state during handshake</li>
+ *   <li>{@link PacketSender} - Thread-safe packet sending</li>
+ * </ul>
+ *
+ * @see SessionState for the session lifecycle states
  */
-public class ProxySession {
+public final class ProxySession {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ProxySession.class);
-    private static final AtomicLong SESSION_ID_GENERATOR = new AtomicLong(0);
+    private static final AtomicLong ID_GENERATOR = new AtomicLong(0);
 
-    private final long sessionId;
-    private final ProxyServer proxyServer;
-    private final QuicChannel clientChannel;
+    // Immutable session identity
+    private final long id;
+    private final ProxyCore proxyCore;
     private final InetSocketAddress clientAddress;
 
-    // Client's TLS certificate (extracted from mTLS handshake)
-    private volatile X509Certificate clientCertificate;
-    private volatile String clientCertificateFingerprint;
+    // Composed components
+    private final SessionChannels channels;
+    private final SessionAuthState authState;
+    private final PacketSender packetSender;
 
-    // Authentication state
-    private volatile com.hypixel.hytale.protocol.packets.auth.AuthGrant authGrant;
-
-    // Proxy authentication - when enabled, we replace client's AuthToken with proxy's tokens
-    private volatile boolean proxyAuthEnabled = false;
-    private volatile String proxyAccessToken;
-    private volatile String proxyServerAuthGrant;
-
-    // Pending ServerAuthToken - held until client sends AuthToken to keep protocol in sync
-    private volatile com.hypixel.hytale.protocol.packets.auth.ServerAuthToken pendingServerAuthToken;
-
-    // Flag to indicate client has sent AuthToken (for timing synchronization)
-    private volatile boolean clientAuthTokenReceived = false;
-
-    // Flag to indicate client auth flow is complete (ServerAuthToken sent to client)
-    private volatile boolean clientAuthComplete = false;
-
-    // Flag to indicate this is a server transfer (no need to re-auth client)
-    private volatile boolean isServerTransfer = false;
-
-    // Buffer for backend packets while client auth is pending
-    private final java.util.Queue<Object> pendingBackendPackets = new java.util.concurrent.ConcurrentLinkedQueue<>();
-
+    // Mutable state (thread-safe)
     private final AtomicReference<SessionState> state = new AtomicReference<>(SessionState.HANDSHAKING);
-    private final AtomicReference<QuicChannel> backendChannel = new AtomicReference<>();
-    private final AtomicReference<QuicStreamChannel> clientStream = new AtomicReference<>();
-    private final AtomicReference<QuicStreamChannel> backendStream = new AtomicReference<>();
+    private final AtomicReference<PlayerIdentity> identity = new AtomicReference<>(PlayerIdentity.unknown());
+    private final AtomicReference<BackendServer> currentBackend = new AtomicReference<>();
 
-    // Player info (populated after Connect packet)
-    private volatile UUID playerUuid;
-    private volatile String playerName;
-    private volatile String protocolHash;
-    private volatile String clientIdentityToken; // Client's identity token from Connect packet
-    private volatile BackendServer currentBackend;
+    // Transfer flag
+    private volatile boolean serverTransfer = false;
 
-    public ProxySession(@Nonnull ProxyServer proxyServer, @Nonnull QuicChannel clientChannel) {
-        this.sessionId = SESSION_ID_GENERATOR.incrementAndGet();
-        this.proxyServer = proxyServer;
-        this.clientChannel = clientChannel;
-        // QUIC channels may return QuicConnectionAddress, extract the underlying address
-        java.net.SocketAddress remoteAddr = clientChannel.remoteAddress();
-        if (remoteAddr instanceof InetSocketAddress) {
-            this.clientAddress = (InetSocketAddress) remoteAddr;
-        } else {
-            // Fallback for QuicConnectionAddress - create a placeholder
-            this.clientAddress = new InetSocketAddress("0.0.0.0", 0);
+    // ==================== Construction ====================
+
+    public ProxySession(@Nonnull ProxyCore proxyCore, @Nonnull QuicChannel clientChannel) {
+        Objects.requireNonNull(proxyCore, "proxyCore");
+        Objects.requireNonNull(clientChannel, "clientChannel");
+
+        this.id = ID_GENERATOR.incrementAndGet();
+        this.proxyCore = proxyCore;
+        this.clientAddress = extractAddress(clientChannel);
+        this.channels = new SessionChannels(id, clientChannel);
+        this.authState = new SessionAuthState();
+        this.packetSender = new PacketSender(id, channels);
+
+        extractCertificate(clientChannel);
+    }
+
+    private InetSocketAddress extractAddress(QuicChannel channel) {
+        SocketAddress addr = channel.remoteAddress();
+        if (addr instanceof InetSocketAddress inet) {
+            return inet;
         }
-
-        // Extract client certificate from mTLS handshake
-        this.clientCertificate = CertificateExtractor.extractClientCertificate(clientChannel);
-        if (this.clientCertificate != null) {
-            this.clientCertificateFingerprint = CertificateExtractor.computeCertificateFingerprint(this.clientCertificate);
-            LOGGER.info("Session {}: Client certificate fingerprint: {}", sessionId, clientCertificateFingerprint);
-            LOGGER.info("Session {}: Client certificate subject: {}", sessionId, clientCertificate.getSubjectX500Principal().getName());
-        } else {
-            LOGGER.warn("Session {}: No client certificate available from mTLS handshake", sessionId);
-        }
+        return new InetSocketAddress("0.0.0.0", 0);
     }
 
-    @Nullable
-    public X509Certificate getClientCertificate() {
-        return clientCertificate;
-    }
-
-    @Nullable
-    public String getClientCertificateFingerprint() {
-        return clientCertificateFingerprint;
-    }
-
-    @Nullable
-    public com.hypixel.hytale.protocol.packets.auth.AuthGrant getAuthGrant() {
-        return authGrant;
-    }
-
-    public void setAuthGrant(@Nullable com.hypixel.hytale.protocol.packets.auth.AuthGrant authGrant) {
-        this.authGrant = authGrant;
-    }
-
-    public boolean isProxyAuthEnabled() {
-        return proxyAuthEnabled;
-    }
-
-    public void setProxyAuthEnabled(boolean enabled) {
-        this.proxyAuthEnabled = enabled;
-    }
-
-    @Nullable
-    public String getProxyAccessToken() {
-        return proxyAccessToken;
-    }
-
-    public void setProxyAccessToken(@Nullable String token) {
-        this.proxyAccessToken = token;
-    }
-
-    @Nullable
-    public String getProxyServerAuthGrant() {
-        return proxyServerAuthGrant;
-    }
-
-    public void setProxyServerAuthGrant(@Nullable String grant) {
-        this.proxyServerAuthGrant = grant;
-    }
-
-    @Nullable
-    public com.hypixel.hytale.protocol.packets.auth.ServerAuthToken getPendingServerAuthToken() {
-        return pendingServerAuthToken;
-    }
-
-    public void setPendingServerAuthToken(@Nullable com.hypixel.hytale.protocol.packets.auth.ServerAuthToken token) {
-        this.pendingServerAuthToken = token;
-    }
-
-    public boolean isClientAuthTokenReceived() {
-        return clientAuthTokenReceived;
-    }
-
-    public void setClientAuthTokenReceived(boolean received) {
-        this.clientAuthTokenReceived = received;
-    }
-
-    public boolean isClientAuthComplete() {
-        return clientAuthComplete;
-    }
-
-    public void setClientAuthComplete(boolean complete) {
-        this.clientAuthComplete = complete;
-    }
-
-    public boolean isServerTransfer() {
-        return isServerTransfer;
-    }
-
-    public void setServerTransfer(boolean serverTransfer) {
-        this.isServerTransfer = serverTransfer;
-    }
-
-    /**
-     * Queue a backend packet to be sent later when client auth is complete.
-     */
-    public void queueBackendPacket(Object packet) {
-        pendingBackendPackets.add(packet);
-        LOGGER.warn("Added packet to pending backend queue for session {}. Queue size: {}", sessionId, pendingBackendPackets.size());
-    }
-
-    /**
-     * Flush all pending backend packets to the client.
-     * Must be called after client auth is complete.
-     */
-    public void flushPendingBackendPackets() {
-        QuicStreamChannel stream = clientStream.get();
-        if (stream == null || !stream.isActive()) {
-            LOGGER.warn("Session {}: Cannot flush pending packets - client stream not active", sessionId);
-            // Release all buffered packets
-            Object packet;
-            while ((packet = pendingBackendPackets.poll()) != null) {
-                if (packet instanceof io.netty.buffer.ByteBuf) {
-                    ((io.netty.buffer.ByteBuf) packet).release();
-                }
-            }
-            return;
-        }
-
-        // Execute on the client stream's event loop to avoid threading issues
-        if (stream.eventLoop().inEventLoop()) {
-            doFlushPendingPackets(stream);
-        } else {
-            stream.eventLoop().execute(() -> doFlushPendingPackets(stream));
+    private void extractCertificate(QuicChannel channel) {
+        X509Certificate cert = CertificateExtractor.extractClientCertificate(channel);
+        if (cert != null) {
+            String fingerprint = CertificateExtractor.computeCertificateFingerprint(cert);
+            authState.setClientCertificate(cert, fingerprint);
+            LOGGER.debug("Session {}: Certificate fingerprint: {}", id, fingerprint);
         }
     }
 
-    private void doFlushPendingPackets(QuicStreamChannel stream) {
-        int count = pendingBackendPackets.size();
-        if (count > 0) {
-            LOGGER.info("Session {}: Flushing {} pending backend packets to client", sessionId, count);
-        }
-        Object packet;
-        while ((packet = pendingBackendPackets.poll()) != null) {
-            if (stream.isActive()) {
-                stream.writeAndFlush(packet);
-            } else {
-                LOGGER.warn("Session {}: Client stream closed during flush", sessionId);
-                // Release remaining packets
-                if (packet instanceof io.netty.buffer.ByteBuf) {
-                    ((io.netty.buffer.ByteBuf) packet).release();
-                }
-                while ((packet = pendingBackendPackets.poll()) != null) {
-                    if (packet instanceof io.netty.buffer.ByteBuf) {
-                        ((io.netty.buffer.ByteBuf) packet).release();
-                    }
-                }
-                break;
-            }
-        }
-    }
-
-    /**
-     * Check if there are pending backend packets.
-     */
-    public boolean hasPendingBackendPackets() {
-        return !pendingBackendPackets.isEmpty();
-    }
+    // ==================== Identity ====================
 
     public long getSessionId() {
-        return sessionId;
-    }
-
-    @Nonnull
-    public ProxyServer getProxyServer() {
-        return proxyServer;
-    }
-
-    @Nonnull
-    public QuicChannel getClientChannel() {
-        return clientChannel;
+        return id;
     }
 
     @Nonnull
@@ -260,339 +110,357 @@ public class ProxySession {
     }
 
     @Nonnull
+    public PlayerIdentity getIdentity() {
+        return identity.get();
+    }
+
+    @Nullable
+    public UUID getPlayerUuid() {
+        return identity.get().uuid();
+    }
+
+    @Nullable
+    public String getUsername() {
+        return identity.get().username();
+    }
+
+    @Nullable
+    public String getPlayerName() {
+        return getUsername();
+    }
+
+    @Nullable
+    public String getProtocolHash() {
+        return identity.get().protocolHash();
+    }
+
+    @Nullable
+    public String getClientIdentityToken() {
+        return identity.get().identityToken();
+    }
+
+    /**
+     * Updates session identity from a Connect packet.
+     */
+    public void handleConnectPacket(@Nonnull Connect connect) {
+        Objects.requireNonNull(connect, "connect");
+        PlayerIdentity newIdentity = PlayerIdentity.fromConnect(connect);
+        identity.set(newIdentity);
+        authState.setOriginalConnect(connect);
+        LOGGER.info("Session {} identified: {}", id, newIdentity);
+    }
+
+    // ==================== State ====================
+
+    @Nonnull
     public SessionState getState() {
         return state.get();
     }
 
     public void setState(@Nonnull SessionState newState) {
+        Objects.requireNonNull(newState, "newState");
         SessionState oldState = state.getAndSet(newState);
-        LOGGER.debug("Session {} state changed: {} -> {}", sessionId, oldState, newState);
+        if (oldState != newState) {
+            LOGGER.debug("Session {} state: {} -> {}", id, oldState, newState);
+        }
+    }
+
+    public boolean isActive() {
+        return channels.isClientActive() && state.get() != SessionState.DISCONNECTED;
+    }
+
+    // ==================== Backend Server ====================
+
+    @Nullable
+    public BackendServer getCurrentBackend() {
+        return currentBackend.get();
+    }
+
+    public void setCurrentBackend(@Nullable BackendServer backend) {
+        currentBackend.set(backend);
     }
 
     @Nullable
-    public QuicChannel getBackendChannel() {
-        return backendChannel.get();
+    public String getCurrentServerName() {
+        BackendServer backend = currentBackend.get();
+        return backend != null ? backend.getName() : null;
     }
 
-    public void setBackendChannel(@Nullable QuicChannel channel) {
-        backendChannel.set(channel);
+    // ==================== Transfer State ====================
+
+    public boolean isServerTransfer() {
+        return serverTransfer;
+    }
+
+    public void setServerTransfer(boolean transfer) {
+        this.serverTransfer = transfer;
+    }
+
+    // ==================== Components Access ====================
+
+    @Nonnull
+    public ProxyCore getProxyCore() {
+        return proxyCore;
+    }
+
+    @Nonnull
+    public SessionChannels getChannels() {
+        return channels;
+    }
+
+    @Nonnull
+    public SessionAuthState getAuthState() {
+        return authState;
+    }
+
+    // ==================== Channel Delegation ====================
+
+    @Nonnull
+    public QuicChannel getClientChannel() {
+        return channels.clientChannel();
     }
 
     @Nullable
     public QuicStreamChannel getClientStream() {
-        return clientStream.get();
+        return channels.clientStream();
     }
 
     public void setClientStream(@Nullable QuicStreamChannel stream) {
-        clientStream.set(stream);
+        channels.setClientStream(stream);
+    }
+
+    @Nullable
+    public QuicChannel getBackendChannel() {
+        return channels.backendChannel();
+    }
+
+    public void setBackendChannel(@Nullable QuicChannel channel) {
+        channels.setBackendChannel(channel);
     }
 
     @Nullable
     public QuicStreamChannel getBackendStream() {
-        return backendStream.get();
+        return channels.backendStream();
     }
 
     public void setBackendStream(@Nullable QuicStreamChannel stream) {
-        backendStream.set(stream);
+        channels.setBackendStream(stream);
+    }
+
+    // ==================== Auth State Delegation ====================
+
+    @Nullable
+    public X509Certificate getClientCertificate() {
+        return authState.clientCertificate();
     }
 
     @Nullable
-    public UUID getPlayerUuid() {
-        return playerUuid;
+    public String getClientCertificateFingerprint() {
+        return authState.certificateFingerprint();
     }
 
     @Nullable
-    public String getPlayerName() {
-        return playerName;
+    public Connect getOriginalConnect() {
+        return authState.originalConnect();
+    }
+
+    public void setOriginalConnect(@Nullable Connect connect) {
+        authState.setOriginalConnect(connect);
     }
 
     @Nullable
-    public String getProtocolHash() {
-        return protocolHash;
+    public String getClientAuthGrant() {
+        return authState.authorizationGrant();
+    }
+
+    public void setClientAuthGrant(@Nullable String grant) {
+        authState.setAuthorizationGrant(grant);
     }
 
     @Nullable
-    public String getClientIdentityToken() {
-        return clientIdentityToken;
+    public String getClientAccessToken() {
+        return authState.accessToken();
     }
 
-    public void setClientIdentityToken(@Nullable String token) {
-        this.clientIdentityToken = token;
+    public void setClientAccessToken(@Nullable String token) {
+        authState.setAccessToken(token);
     }
 
-    @Nullable
-    public BackendServer getCurrentBackend() {
-        return currentBackend;
-    }
-
-    public void setCurrentBackend(@Nullable BackendServer backend) {
-        this.currentBackend = backend;
-    }
+    // ==================== Packet Sending ====================
 
     /**
-     * Update session info from a Connect packet
-     */
-    public void handleConnectPacket(@Nonnull Connect connect) {
-        this.playerUuid = connect.uuid;
-        this.playerName = connect.username;
-        this.protocolHash = connect.protocolHash;
-        this.clientIdentityToken = connect.identityToken;
-        LOGGER.info("Session {} identified: {} ({})", sessionId, playerName, playerUuid);
-    }
-
-    /**
-     * Send a packet to the connected client.
-     * Thread-safe: will execute on the client stream's event loop.
+     * Sends a packet to the connected client.
      */
     public void sendToClient(@Nonnull Packet packet) {
-        QuicStreamChannel stream = clientStream.get();
-        if (stream != null && stream.isActive()) {
-            // Execute on the correct event loop to avoid threading issues
-            if (stream.eventLoop().inEventLoop()) {
-                stream.writeAndFlush(packet);
-            } else {
-                stream.eventLoop().execute(() -> {
-                    if (stream.isActive()) {
-                        stream.writeAndFlush(packet);
-                    }
-                });
-            }
-        } else {
-            LOGGER.warn("Session {}: Cannot send to client - stream not active", sessionId);
-        }
+        packetSender.sendToClient(packet);
     }
 
     /**
-     * Send an arbitrary object (Packet or ByteBuf) to the client.
-     * Thread-safe: will execute on the client stream's event loop.
+     * Sends data to the connected client.
      */
     public void sendToClient(@Nonnull Object obj) {
-        if (obj instanceof Packet) {
-            sendToClient((Packet) obj);
+        if (obj instanceof Packet packet) {
+            packetSender.sendToClient(packet);
+        } else if (obj instanceof ByteBuf buf) {
+            packetSender.sendToClient(buf);
         } else {
-            // Assume it's a ByteBuf - send directly
-            QuicStreamChannel stream = clientStream.get();
-            if (stream != null && stream.isActive()) {
-                // Execute on the correct event loop to avoid threading issues
-                if (stream.eventLoop().inEventLoop()) {
-                    stream.writeAndFlush(obj);
-                } else {
-                    stream.eventLoop().execute(() -> {
-                        if (stream.isActive()) {
-                            stream.writeAndFlush(obj);
-                        } else {
-                            // Release if it's a ByteBuf
-                            if (obj instanceof io.netty.buffer.ByteBuf) {
-                                ((io.netty.buffer.ByteBuf) obj).release();
-                            }
-                        }
-                    });
-                }
-            } else {
-                LOGGER.warn("Session {}: Cannot send to client - stream not active", sessionId);
-                // Release if it's a ByteBuf
-                if (obj instanceof io.netty.buffer.ByteBuf) {
-                    ((io.netty.buffer.ByteBuf) obj).release();
-                }
-            }
+            LOGGER.warn("Session {}: Unsupported send type: {}", id, obj.getClass());
         }
     }
 
     /**
-     * Send a packet to the backend server.
-     * Thread-safe: will execute on the backend stream's event loop.
+     * Sends a packet to the backend server.
      */
     public void sendToBackend(@Nonnull Packet packet) {
-        QuicStreamChannel stream = backendStream.get();
-        if (stream != null && stream.isActive()) {
-            // Execute on the correct event loop to avoid threading issues
-            if (stream.eventLoop().inEventLoop()) {
-                stream.writeAndFlush(packet);
-            } else {
-                stream.eventLoop().execute(() -> {
-                    if (stream.isActive()) {
-                        stream.writeAndFlush(packet);
-                    }
-                });
-            }
-        } else {
-            LOGGER.warn("Session {}: Cannot send to backend - stream not active", sessionId);
-        }
+        packetSender.sendToBackend(packet);
     }
 
     /**
-     * Send an arbitrary object (Packet or ByteBuf) to the backend server.
-     * Thread-safe: will execute on the backend stream's event loop.
+     * Sends data to the backend server.
      */
     public void sendToBackend(@Nonnull Object obj) {
-        if (obj instanceof Packet) {
-            sendToBackend((Packet) obj);
+        if (obj instanceof Packet packet) {
+            packetSender.sendToBackend(packet);
+        } else if (obj instanceof ByteBuf buf) {
+            packetSender.sendToBackend(buf);
         } else {
-            // Assume it's a ByteBuf - send directly
-            QuicStreamChannel stream = backendStream.get();
-            if (stream != null && stream.isActive()) {
-                // Execute on the correct event loop to avoid threading issues
-                if (stream.eventLoop().inEventLoop()) {
-                    stream.writeAndFlush(obj);
-                } else {
-                    stream.eventLoop().execute(() -> {
-                        if (stream.isActive()) {
-                            stream.writeAndFlush(obj);
-                        } else {
-                            // Release if it's a ByteBuf
-                            if (obj instanceof io.netty.buffer.ByteBuf) {
-                                ((io.netty.buffer.ByteBuf) obj).release();
-                            }
-                        }
-                    });
-                }
-            } else {
-                LOGGER.warn("Session {}: Cannot send to backend - stream not active", sessionId);
-                // Release if it's a ByteBuf
-                if (obj instanceof io.netty.buffer.ByteBuf) {
-                    ((io.netty.buffer.ByteBuf) obj).release();
-                }
-            }
+            LOGGER.warn("Session {}: Unsupported send type: {}", id, obj.getClass());
         }
     }
 
     /**
-     * Disconnect the client with a reason
+     * Alias for {@link #sendToBackend(Packet)}.
+     */
+    public void sendToServer(@Nonnull Packet packet) {
+        sendToBackend(packet);
+    }
+
+    /**
+     * Sends a chat message to the player.
+     */
+    public void sendChatMessage(@Nonnull String message) {
+        Objects.requireNonNull(message, "message");
+        sendToClient(new ChatMessage(message));
+    }
+
+    // ==================== Lifecycle ====================
+
+    /**
+     * Disconnects the session with a reason.
      */
     public void disconnect(@Nonnull String reason) {
-        LOGGER.info("Session {} disconnecting: {}", sessionId, reason);
+        Objects.requireNonNull(reason, "reason");
+        LOGGER.info("Session {} disconnecting: {}", id, reason);
+
         state.set(SessionState.DISCONNECTED);
-
-        // Close backend connection first
-        QuicChannel backend = backendChannel.get();
-        if (backend != null && backend.isActive()) {
-            backend.close();
-        }
-
-        // Then close client connection
-        if (clientChannel.isActive()) {
-            clientChannel.close();
-        }
-
-        proxyServer.getSessionManager().removeSession(this);
+        channels.closeAll();
+        proxyCore.getSessionManager().removeSession(this);
     }
 
     /**
-     * Close all connections for this session
+     * Closes all connections without logging a disconnect reason.
      */
     public void close() {
         state.set(SessionState.DISCONNECTED);
-
-        QuicStreamChannel cs = clientStream.get();
-        if (cs != null && cs.isActive()) {
-            cs.close();
-        }
-
-        QuicStreamChannel bs = backendStream.get();
-        if (bs != null && bs.isActive()) {
-            bs.close();
-        }
-
-        QuicChannel bc = backendChannel.get();
-        if (bc != null && bc.isActive()) {
-            bc.close();
-        }
-
-        if (clientChannel.isActive()) {
-            clientChannel.close();
-        }
+        channels.closeAll();
     }
 
     /**
-     * Switch this session to a different backend server.
-     * This disconnects from the current backend and connects to the new one.
+     * Returns the player's ping in milliseconds, or -1 if unknown.
+     */
+    public long getPing() {
+        // TODO: Implement ping tracking
+        return -1;
+    }
+
+    // ==================== Server Transfer ====================
+
+    /**
+     * Switches this session to a different backend server.
      *
-     * @param newBackend The backend server to switch to
-     * @return true if the switch was initiated successfully
+     * @param newBackend the target backend server
+     * @return true if the transfer was initiated
      */
     public boolean switchToServer(@Nonnull BackendServer newBackend) {
+        Objects.requireNonNull(newBackend, "newBackend");
+
         SessionState currentState = state.get();
         if (currentState != SessionState.CONNECTED) {
-            LOGGER.warn("Session {}: Cannot switch servers - not in CONNECTED state (current: {})",
-                sessionId, currentState);
+            LOGGER.warn("Session {}: Cannot switch - not connected (state: {})", id, currentState);
             return false;
         }
 
-        if (currentBackend != null && currentBackend.getName().equalsIgnoreCase(newBackend.getName())) {
-            LOGGER.warn("Session {}: Already connected to server {}", sessionId, newBackend.getName());
+        BackendServer current = currentBackend.get();
+        if (current != null && current.getName().equalsIgnoreCase(newBackend.getName())) {
+            LOGGER.warn("Session {}: Already connected to {}", id, newBackend.getName());
             return false;
         }
 
-        LOGGER.info("Session {}: Initiating server switch from {} to {}",
-            sessionId, currentBackend != null ? currentBackend.getName() : "none", newBackend.getName());
+        LOGGER.info("Session {}: Switching from {} to {}",
+            id,
+            current != null ? current.getName() : "none",
+            newBackend.getName());
 
-        // Set state to transferring
         setState(SessionState.TRANSFERRING);
+        serverTransfer = true;
+        channels.closeBackend();
 
-        // Mark this as a server transfer - client is already authenticated
-        this.isServerTransfer = true;
-
-        // Reset authentication state for the new BACKEND connection only
-        // Client auth state is preserved (they're already authenticated)
-        resetAuthStateForTransfer();
-
-        // Close the current backend connection
-        closeBackendConnection();
-
-        // Create a new Connect packet with the player's info
-        Connect connectPacket = new Connect();
-        connectPacket.uuid = playerUuid;
-        connectPacket.username = playerName;
-        connectPacket.protocolHash = protocolHash;
-        connectPacket.identityToken = clientIdentityToken;
-
-        // Initiate connection to the new backend
-        proxyServer.getBackendConnector().reconnect(this, newBackend, connectPacket);
+        Connect connectPacket = createTransferConnect();
+        proxyCore.getBackendConnector().reconnect(this, newBackend, connectPacket);
 
         return true;
     }
 
     /**
-     * Reset authentication state for a server transfer (backend auth only).
-     * Preserves client auth state since they're already authenticated.
+     * Transfers to a server by address.
      */
-    private void resetAuthStateForTransfer() {
-        this.authGrant = null;
-        this.proxyAuthEnabled = false;
-        this.proxyAccessToken = null;
-        this.proxyServerAuthGrant = null;
-        this.pendingServerAuthToken = null;
-        // DO NOT reset clientAuthTokenReceived or clientAuthComplete - client is already authenticated
-        // Clear any pending packets from the old backend
-        pendingBackendPackets.clear();
+    public boolean transferTo(@Nonnull String host, int port) {
+        Objects.requireNonNull(host, "host");
+
+        // Find existing backend
+        for (BackendServer backend : proxyCore.getConfig().getBackends()) {
+            if (backend.getHost().equalsIgnoreCase(host) && backend.getPort() == port) {
+                return switchToServer(backend);
+            }
+        }
+
+        // Create temporary backend
+        BackendServer temp = new BackendServer("temp-" + host + "-" + port, host, port, false);
+        return switchToServer(temp);
     }
 
-    /**
-     * Close the backend connection without disconnecting the client
-     */
-    private void closeBackendConnection() {
-        QuicStreamChannel bs = backendStream.get();
-        if (bs != null && bs.isActive()) {
-            bs.close();
-        }
-        backendStream.set(null);
-
-        QuicChannel bc = backendChannel.get();
-        if (bc != null && bc.isActive()) {
-            bc.close();
-        }
-        backendChannel.set(null);
+    private Connect createTransferConnect() {
+        PlayerIdentity id = identity.get();
+        Connect connect = new Connect();
+        connect.uuid = id.uuid();
+        connect.username = id.username();
+        connect.protocolHash = id.protocolHash();
+        connect.identityToken = id.identityToken();
+        return connect;
     }
+
+    // ==================== Object Methods ====================
 
     @Override
     public String toString() {
-        return "ProxySession{" +
-            "id=" + sessionId +
-            ", player=" + playerName +
-            ", uuid=" + playerUuid +
-            ", state=" + state.get() +
-            ", clientAddress=" + clientAddress +
-            '}';
+        PlayerIdentity id = identity.get();
+        return String.format("ProxySession{id=%d, player=%s, uuid=%s, state=%s, address=%s}",
+            this.id,
+            id.username(),
+            id.uuid(),
+            state.get(),
+            clientAddress);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof ProxySession that)) return false;
+        return id == that.id;
+    }
+
+    @Override
+    public int hashCode() {
+        return Long.hashCode(id);
     }
 }
-
