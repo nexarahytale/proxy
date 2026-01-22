@@ -1,4 +1,4 @@
-rootProject.name = "Numdrassl"
+rootProject.name = "NEXARA"
 
 include("api")
 include("common")
