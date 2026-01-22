@@ -18,6 +18,8 @@ import me.internalizable.numdrassl.command.builtin.ServerCommand;
 import me.internalizable.numdrassl.command.builtin.SessionsCommand;
 import me.internalizable.numdrassl.command.builtin.StopCommand;
 import me.internalizable.numdrassl.event.api.NumdrasslEventManager;
+import me.internalizable.numdrassl.servermanager.ServerManager;
+import me.internalizable.numdrassl.servermanager.command.ServerManageCommand;
 import me.internalizable.numdrassl.plugin.bridge.ApiEventBridge;
 import me.internalizable.numdrassl.plugin.loader.NumdrasslPluginManager;
 import me.internalizable.numdrassl.plugin.permission.NumdrasslPermissionManager;
@@ -64,6 +66,9 @@ public final class NumdrasslProxy implements ProxyServer {
     // Server registry
     private final Map<String, NumdrasslRegisteredServer> servers = new ConcurrentHashMap<>();
 
+    // Server Manager (CloudNet-style)
+    private ServerManager serverManager;
+
     // Paths
     private final Path dataDirectory;
     private final Path configDirectory;
@@ -107,6 +112,7 @@ public final class NumdrasslProxy implements ProxyServer {
     public void initialize() {
         registerBuiltinCommands();
         registerCommandListener();
+        initializeServerManager();
         loadPlugins();
     }
 
@@ -123,6 +129,22 @@ public final class NumdrasslProxy implements ProxyServer {
         eventManager.register(this, new CommandEventListener(commandManager));
     }
 
+    private void initializeServerManager() {
+        try {
+            serverManager = new ServerManager(this);
+            serverManager.initialize();
+            
+            // Register server manager command
+            commandManager.register(this, new ServerManageCommand(serverManager), "servermanager", "sm");
+            
+            org.slf4j.LoggerFactory.getLogger(NumdrasslProxy.class)
+                .info("Server manager initialized successfully");
+        } catch (Exception e) {
+            org.slf4j.LoggerFactory.getLogger(NumdrasslProxy.class)
+                .error("Failed to initialize server manager: {}", e.getMessage(), e);
+        }
+    }
+
     private void loadPlugins() {
         pluginManager.loadPlugins();
         pluginManager.enablePlugins();
@@ -135,6 +157,11 @@ public final class NumdrasslProxy implements ProxyServer {
      * Called by {@link ProxyCore} during shutdown sequence.
      */
     public void shutdownApi() {
+        // Shutdown server manager first
+        if (serverManager != null) {
+            serverManager.shutdown();
+        }
+        
         pluginManager.disablePlugins();
         scheduler.shutdown();
         eventManager.shutdown();
@@ -314,6 +341,16 @@ public final class NumdrasslProxy implements ProxyServer {
     @Nonnull
     public ApiEventBridge getEventBridge() {
         return eventBridge;
+    }
+
+    /**
+     * Gets the server manager for CloudNet-style server management.
+     *
+     * @return the server manager, or null if not initialized
+     */
+    @javax.annotation.Nullable
+    public ServerManager getServerManager() {
+        return serverManager;
     }
 }
 

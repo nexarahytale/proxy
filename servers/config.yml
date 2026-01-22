@@ -1,0 +1,77 @@
+# Numdrassl Server Manager Configuration
+# CloudNet-style server management for Hytale
+
+# Java executable path
+javaPath: java
+
+# Default fallback server for player transfers
+defaultFallbackServer: lobby
+
+# Health check interval in seconds
+healthCheckIntervalSeconds: 30
+
+# Process start timeout in seconds
+processStartTimeoutSeconds: 60
+
+# Port allocation ranges
+portAllocation:
+  staticRangeStart: 6000
+  staticRangeEnd: 6050
+  dynamicRangeStart: 6100
+  dynamicRangeEnd: 6500
+
+# Dynamic spawning settings
+dynamicSpawning:
+  enabled: true
+  autoCleanup: true
+  maxConcurrent: 50
+  minAvailablePorts: 10
+
+# Static servers (persistent, survive proxy restarts)
+staticServers:
+  lobby:
+    port: 6000
+    maxPlayers: 100
+    alwaysOn: true
+    worldFolder: servers/static/lobby
+    memory: 2G
+    jvmArgs: []
+    environment: {}
+
+# Template configurations (for dynamic spawning)
+templates:
+  bedwars:
+    displayName: Bedwars
+    maxPlayers: 16
+    portRangeStart: 6100
+    portRangeEnd: 6200
+    memory: 2G
+    worldReset: true
+    autoCleanupDelaySeconds: 300
+    gracefulShutdownTimeoutSeconds: 30
+    jvmArgs: []
+    environment: {}
+
+  skywars:
+    displayName: Skywars
+    maxPlayers: 12
+    portRangeStart: 6200
+    portRangeEnd: 6300
+    memory: 2G
+    worldReset: true
+    autoCleanupDelaySeconds: 300
+    gracefulShutdownTimeoutSeconds: 30
+    jvmArgs: []
+    environment: {}
+
+  survival:
+    displayName: Survival
+    maxPlayers: 50
+    portRangeStart: 6300
+    portRangeEnd: 6400
+    memory: 4G
+    worldReset: false
+    autoCleanupDelaySeconds: 600
+    gracefulShutdownTimeoutSeconds: 60
+    jvmArgs: []
+    environment: {}

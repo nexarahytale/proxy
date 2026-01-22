@@ -1,0 +1,12 @@
+# Persistent data for static lobby server
+# This file stores data that persists across server restarts
+
+# Server statistics
+statistics:
+  totalPlayersJoined: 0
+  totalPlayTime: 0
+  lastStartup: null
+  lastShutdown: null
+
+# Custom data (plugins can store data here)
+customData: {}

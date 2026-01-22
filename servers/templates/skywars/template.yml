@@ -1,0 +1,29 @@
+# Skywars Server Template
+# Dynamic minigame server template
+
+name: Skywars
+type: minigame
+serverIdPrefix: skywars
+maxPlayers: 12
+memoryAllocation: 2G
+worldResetOnShutdown: true
+pluginLoader: plugins/NumdrasslBridge.jar
+startupCommand: ./startup.sh
+gracefulShutdownTimeout: 30
+
+# Spawn location for players
+respawnLocation:
+  x: 0.0
+  y: 100.0
+  z: 0.0
+
+# Server JAR (relative to template directory)
+serverJar: server.jar
+
+# Default server properties
+serverProperties:
+  server-name: Skywars Arena
+  max-players: "12"
+  online-mode: "false"
+  pvp: "true"
+  difficulty: "normal"

@@ -1,0 +1,2 @@
+# Dynamic servers are created here at runtime
+# This directory is cleaned on proxy startup

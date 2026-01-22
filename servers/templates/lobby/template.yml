@@ -1,0 +1,28 @@
+# Lobby Server Template
+# This template is used for lobby/hub servers
+
+name: Lobby
+type: lobby
+serverIdPrefix: lobby
+maxPlayers: 100
+memoryAllocation: 2G
+worldResetOnShutdown: false
+pluginLoader: plugins/NumdrasslBridge.jar
+startupCommand: ./startup.sh
+gracefulShutdownTimeout: 30
+
+# Spawn location for players
+respawnLocation:
+  x: 0.0
+  y: 64.0
+  z: 0.0
+
+# Server JAR (relative to template directory)
+serverJar: server.jar
+
+# Default server properties
+serverProperties:
+  server-name: Hytale Lobby
+  max-players: "100"
+  online-mode: "false"
+  enable-rcon: "false"
