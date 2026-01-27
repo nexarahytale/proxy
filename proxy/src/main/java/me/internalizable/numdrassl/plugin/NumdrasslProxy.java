@@ -2,34 +2,42 @@ package me.internalizable.numdrassl.plugin;
 
 import me.internalizable.numdrassl.api.Numdrassl;
 import me.internalizable.numdrassl.api.ProxyServer;
+import me.internalizable.numdrassl.api.cluster.ClusterManager;
 import me.internalizable.numdrassl.api.command.CommandManager;
+import me.internalizable.numdrassl.api.command.CommandSource;
 import me.internalizable.numdrassl.api.event.EventManager;
+import me.internalizable.numdrassl.api.messaging.MessagingService;
 import me.internalizable.numdrassl.api.permission.PermissionManager;
 import me.internalizable.numdrassl.api.player.Player;
 import me.internalizable.numdrassl.api.plugin.PluginManager;
+import me.internalizable.numdrassl.api.plugin.messaging.ChannelRegistrar;
 import me.internalizable.numdrassl.api.scheduler.Scheduler;
 import me.internalizable.numdrassl.api.server.RegisteredServer;
+import me.internalizable.numdrassl.cluster.NumdrasslClusterManager;
 import me.internalizable.numdrassl.command.CommandEventListener;
+import me.internalizable.numdrassl.command.ConsoleCommandSource;
 import me.internalizable.numdrassl.command.NumdrasslCommandManager;
-import me.internalizable.numdrassl.command.builtin.AuthCommand;
-import me.internalizable.numdrassl.command.builtin.HelpCommand;
-import me.internalizable.numdrassl.command.builtin.NumdrasslCommand;
-import me.internalizable.numdrassl.command.builtin.ServerCommand;
-import me.internalizable.numdrassl.command.builtin.SessionsCommand;
-import me.internalizable.numdrassl.command.builtin.StopCommand;
+import me.internalizable.numdrassl.command.builtin.*;
 import me.internalizable.numdrassl.event.api.NumdrasslEventManager;
+import me.internalizable.numdrassl.messaging.local.LocalMessagingService;
+import me.internalizable.numdrassl.messaging.redis.RedisMessagingService;
 import me.internalizable.numdrassl.servermanager.ServerManager;
 import me.internalizable.numdrassl.servermanager.command.ServerManageCommand;
 import me.internalizable.numdrassl.plugin.bridge.ApiEventBridge;
 import me.internalizable.numdrassl.plugin.loader.NumdrasslPluginManager;
+import me.internalizable.numdrassl.plugin.messaging.NumdrasslChannelRegistrar;
+import me.internalizable.numdrassl.plugin.messaging.NoOpBackendMessagingService;
 import me.internalizable.numdrassl.plugin.permission.NumdrasslPermissionManager;
 import me.internalizable.numdrassl.plugin.player.NumdrasslPlayer;
 import me.internalizable.numdrassl.plugin.server.NumdrasslRegisteredServer;
 import me.internalizable.numdrassl.scheduler.NumdrasslScheduler;
 import me.internalizable.numdrassl.server.ProxyCore;
 import me.internalizable.numdrassl.session.ProxySession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -50,6 +58,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class NumdrasslProxy implements ProxyServer {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(NumdrasslProxy.class);
     private static final String VERSION = "1.0.0-SNAPSHOT";
 
     // Core reference
@@ -61,7 +70,10 @@ public final class NumdrasslProxy implements ProxyServer {
     private final NumdrasslPluginManager pluginManager;
     private final NumdrasslScheduler scheduler;
     private final NumdrasslPermissionManager permissionManager;
+    private final NumdrasslChannelRegistrar channelRegistrar;
     private final ApiEventBridge eventBridge;
+    private final NumdrasslClusterManager clusterManager;
+    private MessagingService messagingService;
 
     // Server registry
     private final Map<String, NumdrasslRegisteredServer> servers = new ConcurrentHashMap<>();
@@ -81,10 +93,12 @@ public final class NumdrasslProxy implements ProxyServer {
         this.commandManager = new NumdrasslCommandManager();
         this.scheduler = new NumdrasslScheduler();
         this.permissionManager = new NumdrasslPermissionManager();
+        this.channelRegistrar = new NumdrasslChannelRegistrar();
         this.dataDirectory = Paths.get("data");
         this.configDirectory = Paths.get("config");
         this.pluginManager = new NumdrasslPluginManager(this, Paths.get("plugins"));
         this.eventBridge = new ApiEventBridge(this);
+        this.clusterManager = new NumdrasslClusterManager(core.getConfig(), core.getSessionManager());
 
         core.getEventManager().registerListener(eventBridge);
         registerConfiguredServers();
@@ -110,10 +124,37 @@ public final class NumdrasslProxy implements ProxyServer {
      * Called by {@link ProxyCore} after networking is ready.
      */
     public void initialize() {
+        initializeMessaging();
         registerBuiltinCommands();
         registerCommandListener();
         initializeServerManager();
         loadPlugins();
+    }
+
+
+    private void initializeMessaging() {
+        var config = core.getConfig();
+
+        if (config.isClusterEnabled()) {
+            try {
+                this.messagingService = RedisMessagingService.create(
+                        clusterManager.getLocalProxyId(),
+                        config
+                );
+                clusterManager.initialize(messagingService, eventManager);
+                LOGGER.info("Cluster mode enabled - connected to Redis");
+            } catch (Exception e) {
+                LOGGER.error("Failed to connect to Redis, falling back to local mode", e);
+                this.messagingService = new LocalMessagingService(clusterManager.getLocalProxyId());
+                // Initialize cluster manager with local service to maintain consistent state
+                clusterManager.initializeLocalMode(messagingService, eventManager);
+                LOGGER.warn("Cluster manager running in degraded local-only mode");
+            }
+        } else {
+            this.messagingService = new LocalMessagingService(clusterManager.getLocalProxyId());
+            clusterManager.initializeLocalMode(messagingService, eventManager);
+            LOGGER.info("Running in standalone mode (cluster disabled)");
+        }
     }
 
     private void registerBuiltinCommands() {
@@ -122,7 +163,9 @@ public final class NumdrasslProxy implements ProxyServer {
         commandManager.register(this, new SessionsCommand(core));
         commandManager.register(this, new StopCommand(core), "shutdown", "end");
         commandManager.register(this, new ServerCommand(), "srv");
+        commandManager.register(this, new FindCommand(), "find-server");
         commandManager.register(this, new NumdrasslCommand(), "nd", "proxy");
+        commandManager.register(this, new MetricsCommand(), "stats", "perf", "performance");
     }
 
     private void registerCommandListener() {
@@ -163,6 +206,12 @@ public final class NumdrasslProxy implements ProxyServer {
         }
         
         pluginManager.disablePlugins();
+        clusterManager.shutdown();
+
+        if (messagingService instanceof RedisMessagingService redisService) {
+            redisService.shutdown();
+        }
+
         scheduler.shutdown();
         eventManager.shutdown();
     }
@@ -183,8 +232,20 @@ public final class NumdrasslProxy implements ProxyServer {
 
     @Override
     @Nonnull
+    public CommandSource getConsoleCommandSource() {
+        return ConsoleCommandSource.getInstance();
+    }
+
+    @Override
+    @Nonnull
     public PluginManager getPluginManager() {
         return pluginManager;
+    }
+
+    @Override
+    @Nonnull
+    public ChannelRegistrar getChannelRegistrar() {
+        return channelRegistrar;
     }
 
     @Override
@@ -199,6 +260,33 @@ public final class NumdrasslProxy implements ProxyServer {
         return permissionManager;
     }
 
+    @Override
+    @Nonnull
+    public MessagingService getMessagingService() {
+        if (messagingService == null) {
+            throw new IllegalStateException("MessagingService not initialized; call initialize() first");
+        }
+        return messagingService;
+    }
+
+    @Override
+    @Nonnull
+    public me.internalizable.numdrassl.api.messaging.backend.BackendMessagingService getBackendMessagingService() {
+        // TODO: Implement backend messaging via Redis pub/sub
+        return NoOpBackendMessagingService.INSTANCE;
+    }
+
+    @Override
+    @Nonnull
+    public ClusterManager getClusterManager() {
+        return clusterManager;
+    }
+
+    @Override
+    public int getGlobalPlayerCount() {
+        return clusterManager.getGlobalPlayerCount();
+    }
+
     // ==================== Player Management ====================
 
     @Override
@@ -206,7 +294,10 @@ public final class NumdrasslProxy implements ProxyServer {
     public Collection<Player> getAllPlayers() {
         List<Player> players = new ArrayList<>();
         for (ProxySession session : core.getSessionManager().getAllSessions()) {
-            players.add(new NumdrasslPlayer(session, this));
+            Player player = getOrCreatePlayer(session);
+            if (player != null) {
+                players.add(player);
+            }
         }
         return Collections.unmodifiableList(players);
     }
@@ -216,7 +307,7 @@ public final class NumdrasslProxy implements ProxyServer {
     public Optional<Player> getPlayer(@Nonnull UUID uuid) {
         Objects.requireNonNull(uuid, "uuid");
         return core.getSessionManager().findByUuid(uuid)
-            .map(session -> new NumdrasslPlayer(session, this));
+            .map(this::getOrCreatePlayer);
     }
 
     @Override
@@ -225,10 +316,30 @@ public final class NumdrasslProxy implements ProxyServer {
         Objects.requireNonNull(username, "username");
         for (ProxySession session : core.getSessionManager().getAllSessions()) {
             if (username.equalsIgnoreCase(session.getUsername())) {
-                return Optional.of(new NumdrasslPlayer(session, this));
+                return Optional.ofNullable(getOrCreatePlayer(session));
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Gets the cached player for a session, or creates and caches a new one.
+     */
+    @Nullable
+    private Player getOrCreatePlayer(@Nonnull ProxySession session) {
+        // Check for cached player first
+        Player cached = session.getCachedPlayer();
+        if (cached != null) {
+            return cached;
+        }
+
+        // Create new player if identity is available
+        if (session.getPlayerUuid() != null || session.getUsername() != null) {
+            NumdrasslPlayer player = new NumdrasslPlayer(session, this);
+            session.setCachedPlayer(player);
+            return player;
+        }
+        return null;
     }
 
     @Override

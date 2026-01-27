@@ -1,10 +1,15 @@
 package me.internalizable.numdrassl.api;
 
+import me.internalizable.numdrassl.api.cluster.ClusterManager;
 import me.internalizable.numdrassl.api.command.CommandManager;
+import me.internalizable.numdrassl.api.command.CommandSource;
 import me.internalizable.numdrassl.api.event.EventManager;
+import me.internalizable.numdrassl.api.messaging.MessagingService;
+import me.internalizable.numdrassl.api.messaging.backend.BackendMessagingService;
 import me.internalizable.numdrassl.api.permission.PermissionManager;
 import me.internalizable.numdrassl.api.player.Player;
 import me.internalizable.numdrassl.api.plugin.PluginManager;
+import me.internalizable.numdrassl.api.plugin.messaging.ChannelRegistrar;
 import me.internalizable.numdrassl.api.scheduler.Scheduler;
 import me.internalizable.numdrassl.api.server.RegisteredServer;
 
@@ -60,12 +65,36 @@ public interface ProxyServer {
     CommandManager getCommandManager();
 
     /**
+     * Get the console command source.
+     *
+     * <p>The console command source represents the server console and can be used
+     * to execute commands programmatically or to identify console-originated actions.
+     * It is also a {@link me.internalizable.numdrassl.api.permission.PermissionSubject}
+     * for permission checks.</p>
+     *
+     * @return the console command source
+     */
+    @Nonnull
+    CommandSource getConsoleCommandSource();
+
+    /**
      * Get the plugin manager for managing plugins.
      *
      * @return the plugin manager
      */
     @Nonnull
     PluginManager getPluginManager();
+
+    /**
+     * Get the channel registrar for plugin messaging.
+     *
+     * <p>Plugin message channels allow communication between the proxy and backend servers.
+     * This is used by plugins like LuckPerms to synchronize data.</p>
+     *
+     * @return the channel registrar
+     */
+    @Nonnull
+    ChannelRegistrar getChannelRegistrar();
 
     /**
      * Get the scheduler for scheduling tasks.
@@ -85,6 +114,49 @@ public interface ProxyServer {
      */
     @Nonnull
     PermissionManager getPermissionManager();
+
+    /**
+     * Get the messaging service for cross-proxy communication.
+     *
+     * <p>The messaging service enables pub/sub communication between proxy instances
+     * in a distributed deployment. Returns a no-op implementation if clustering is disabled.</p>
+     *
+     * @return the messaging service
+     */
+    @Nonnull
+    MessagingService getMessagingService();
+
+    /**
+     * Get the backend messaging service for proxy-to-backend communication.
+     *
+     * <p>The backend messaging service enables bidirectional communication between
+     * the proxy and backend servers running the Bridge plugin. Unlike player-based
+     * plugin messaging, this works even when no players are connected.</p>
+     *
+     * @return the backend messaging service
+     */
+    @Nonnull
+    BackendMessagingService getBackendMessagingService();
+
+    /**
+     * Get the cluster manager for managing proxy instances.
+     *
+     * <p>The cluster manager tracks all online proxies, aggregates global state,
+     * and provides methods for cross-proxy coordination.</p>
+     *
+     * @return the cluster manager
+     */
+    @Nonnull
+    ClusterManager getClusterManager();
+
+    /**
+     * Get the total player count across all proxies in the cluster.
+     *
+     * <p>If clustering is disabled, returns the local player count.</p>
+     *
+     * @return the global player count
+     */
+    int getGlobalPlayerCount();
 
     /**
      * Get all currently connected players.

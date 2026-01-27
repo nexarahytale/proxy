@@ -1,11 +1,10 @@
 package me.internalizable.numdrassl.server;
 
+import com.hypixel.hytale.protocol.HostAddress;
+import com.hypixel.hytale.protocol.Packet;
 import com.hypixel.hytale.protocol.packets.connection.Connect;
 import io.netty.bootstrap.Bootstrap;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandler;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.EventLoopGroup;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.incubator.codec.quic.QuicChannel;
@@ -17,9 +16,12 @@ import io.netty.incubator.codec.quic.QuicStreamChannel;
 import io.netty.incubator.codec.quic.QuicStreamType;
 import me.internalizable.numdrassl.common.SecretMessageUtil;
 import me.internalizable.numdrassl.config.BackendServer;
+import me.internalizable.numdrassl.event.packet.ProxyPing;
+import me.internalizable.numdrassl.event.packet.ProxyPong;
 import me.internalizable.numdrassl.pipeline.BackendPacketHandler;
 import me.internalizable.numdrassl.pipeline.codec.ProxyPacketDecoder;
 import me.internalizable.numdrassl.pipeline.codec.ProxyPacketEncoder;
+import me.internalizable.numdrassl.profiling.ProxyMetrics;
 import me.internalizable.numdrassl.api.chat.ChatMessageBuilder;
 import me.internalizable.numdrassl.session.ProxySession;
 import me.internalizable.numdrassl.session.SessionState;
@@ -37,6 +39,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Base64;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -112,7 +115,10 @@ public final class BackendConnector {
             this.sslContext = QuicSslContextBuilder.forClient()
                 .trustManager(io.netty.handler.ssl.util.InsecureTrustManagerFactory.INSTANCE)
                 .keyManager(keyFile, null, certFile)
-                .applicationProtocols("hytale/1")
+                .applicationProtocols(
+                    "hytale/10", "hytale/9", "hytale/8", "hytale/7", "hytale/6",
+                    "hytale/5", "hytale/4", "hytale/3", "hytale/2", "hytale/1"
+                )
                 .build();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to create SSL context", e);
@@ -302,6 +308,7 @@ public final class BackendConnector {
         LOGGER.info("Session {}: Connected to backend {} QUIC channel",
             session.getSessionId(), backend.getName());
         session.setBackendChannel(quicChannel);
+        ProxyMetrics.getInstance().recordBackendConnection(backend.getName());
 
         createBackendStream(session, quicChannel, backend, connectPacket, isReconnect, debugMode);
     }
@@ -341,6 +348,8 @@ public final class BackendConnector {
             session.getSessionId(), backend.getName());
 
         Connect signedConnect = createSignedConnectPacket(session, connectPacket);
+        LOGGER.debug("Session {}: Writing Connect to backend stream - final check: protocolCrc={}, buildNumber={}, clientVersion='{}'",
+            session.getSessionId(), signedConnect.protocolCrc, signedConnect.protocolBuildNumber, signedConnect.clientVersion);
         stream.writeAndFlush(signedConnect);
         session.setState(SessionState.AUTHENTICATING);
 
@@ -350,6 +359,7 @@ public final class BackendConnector {
     }
 
     private void handleConnectionFailure(ProxySession session, String serverName, boolean isReconnect) {
+        ProxyMetrics.getInstance().recordBackendConnectionFailure(serverName);
         if (isReconnect) {
             sendTransferFailedMessage(session, serverName);
         } else {
@@ -360,6 +370,9 @@ public final class BackendConnector {
     // ==================== Signed Connect Packet ====================
 
     private Connect createSignedConnectPacket(ProxySession session, Connect original) {
+        LOGGER.debug("Session {}: Original Connect packet - protocolCrc={}, buildNumber={}, clientVersion='{}'",
+            session.getSessionId(), original.protocolCrc, original.protocolBuildNumber, original.clientVersion);
+
         String backendName = session.getCurrentBackend() != null
             ? session.getCurrentBackend().getName()
             : "unknown";
@@ -377,8 +390,124 @@ public final class BackendConnector {
 
         Connect proxyConnect = new Connect(original);
         proxyConnect.referralData = referralData;
+        proxyConnect.referralSource = createReferralSource();
+
+        LOGGER.debug("Session {}: Sending Connect to backend - protocolCrc={}, buildNumber={}, clientVersion='{}', uuid={}, username={}, referralSource={}:{}",
+            session.getSessionId(), proxyConnect.protocolCrc, proxyConnect.protocolBuildNumber,
+            proxyConnect.clientVersion, proxyConnect.uuid, proxyConnect.username,
+            proxyConnect.referralSource != null ? proxyConnect.referralSource.host : "null",
+            proxyConnect.referralSource != null ? proxyConnect.referralSource.port : 0);
+
         return proxyConnect;
     }
+
+    /**
+     * Creates the referral source address pointing to this proxy.
+     * This allows the backend to know where the player was referred from.
+     */
+    private HostAddress createReferralSource() {
+        String host = proxyCore.getConfig().getPublicAddress();
+        if (host == null || host.isEmpty()) {
+            host = proxyCore.getConfig().getBindAddress();
+        }
+        int port = proxyCore.getConfig().getBindPort();
+        return new HostAddress(host, (short) port);
+    }
+
+    public CompletableFuture<Boolean> checkBackendAlive(BackendServer backend, long timeoutMs) {
+        Objects.requireNonNull(backend, "backend");
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+        InetSocketAddress address = new InetSocketAddress(backend.getHost(), backend.getPort());
+
+        Bootstrap bootstrap = createBootstrap();
+        bootstrap.bind(0).addListener((ChannelFutureListener) bindFuture -> {
+            if (!bindFuture.isSuccess()) {
+                future.complete(false);
+                return;
+            }
+
+            Channel datagramChannel = bindFuture.channel();
+
+            datagramChannel.eventLoop().schedule(() -> {
+                if (future.complete(false)) {
+                    datagramChannel.close();
+                }
+            }, timeoutMs, TimeUnit.MILLISECONDS);
+
+            QuicChannel.newBootstrap(datagramChannel)
+                    .remoteAddress(address)
+                    .streamHandler(new ChannelInitializer<QuicStreamChannel>() {
+                        @Override
+                        protected void initChannel(QuicStreamChannel ch) throws Exception {
+                        }
+                    })
+                    .connect()
+                    .addListener(connectFuture -> {
+                        if (!connectFuture.isSuccess()) {
+                            if (future.complete(false)) {
+                                datagramChannel.close();
+                            }
+                            return;
+                        }
+
+                        QuicChannel quicChannel = (QuicChannel) connectFuture.getNow();
+
+                        quicChannel.createStream(QuicStreamType.BIDIRECTIONAL, new ChannelInitializer<QuicStreamChannel>() {
+                            @Override
+                            protected void initChannel(QuicStreamChannel ch) {
+                                boolean debugMode = proxyCore.getConfig().isDebugMode();
+
+                                ch.pipeline().addLast(new ProxyPacketDecoder("backend-ping", debugMode));
+                                ch.pipeline().addLast(new ProxyPacketEncoder("backend-ping", debugMode));
+
+                                ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
+                                    @Override
+                                    protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
+                                        if (packet instanceof ProxyPong) {
+                                            if (!future.isDone()) {
+                                                future.complete(true);
+                                            }
+                                            ctx.close();
+                                            return;
+                                        }
+                                    }
+                                });
+                            }
+                        }).addListener(streamFuture -> {
+                            if (!streamFuture.isSuccess()) {
+                                if (future.complete(false)) {
+                                    quicChannel.eventLoop().execute(() -> quicChannel.close());
+                                    datagramChannel.close();
+                                }
+                                return;
+                            }
+
+                            QuicStreamChannel stream = (QuicStreamChannel) streamFuture.getNow();
+
+                            ProxyPing ping = new ProxyPing();
+                            ping.timestamp = System.currentTimeMillis();
+                            ping.nonce = new SecureRandom().nextLong();
+
+                            stream.writeAndFlush(ping).addListener(writeFuture -> {
+                                if (!writeFuture.isSuccess()) {
+                                    if (future.complete(false)) {
+                                        stream.close();
+                                    }
+                                }
+                            });
+                        });
+
+                        future.whenComplete((ok, err) -> {
+                            quicChannel.eventLoop().execute(quicChannel::close);
+                            datagramChannel.close();
+                        });
+                    });
+        });
+
+        return future;
+    }
+
 
     // ==================== Transfer Messages ====================
 

@@ -2,9 +2,7 @@ package me.internalizable.numdrassl.api.command;
 
 import me.internalizable.numdrassl.api.chat.ChatMessageBuilder;
 import me.internalizable.numdrassl.api.chat.FormattedMessagePart;
-import me.internalizable.numdrassl.api.permission.PermissionFunction;
 import me.internalizable.numdrassl.api.permission.PermissionSubject;
-import me.internalizable.numdrassl.api.permission.Tristate;
 import me.internalizable.numdrassl.api.player.Player;
 
 import javax.annotation.Nonnull;
@@ -15,6 +13,9 @@ import java.util.Optional;
  *
  * <p>This can be a player, the console, or another command source.
  * All command sources are permission subjects and can be checked for permissions.</p>
+ *
+ * <p>The {@link Player} interface extends this interface, so all players
+ * are also command sources.</p>
  */
 public interface CommandSource extends PermissionSubject {
 
@@ -34,19 +35,23 @@ public interface CommandSource extends PermissionSubject {
      * @param builder the message builder
      */
     default void sendMessage(@Nonnull ChatMessageBuilder builder) {
-        Optional<Player> player = asPlayer();
-        if (player.isPresent()) {
-            player.get().sendMessage(builder);
-        } else {
-            // Strip colors for console
-            StringBuilder sb = new StringBuilder();
-            for (FormattedMessagePart part : builder.getParts()) {
-                if (part.getText() != null) {
-                    sb.append(part.getText());
-                }
-            }
-            sendMessage(sb.toString());
+        Optional<Player> playerOpt = this.asPlayer();
+
+        if (playerOpt.isPresent()) {
+            Player player = playerOpt.get();
+            player.sendMessage(builder);
+            return;
         }
+
+        // Console fallback: strip formatting and send plain text
+        StringBuilder sb = new StringBuilder();
+        for (FormattedMessagePart part : builder.getParts()) {
+            if (part.getText() != null) {
+                sb.append(part.getText());
+            }
+        }
+
+        sendMessage(sb.toString());
     }
 
     /**
@@ -55,7 +60,12 @@ public interface CommandSource extends PermissionSubject {
      * @return the player, or empty if this is not a player
      */
     @Nonnull
-    Optional<Player> asPlayer();
+    default Optional<Player> asPlayer() {
+        if (this instanceof Player player) {
+            return Optional.of(player);
+        }
+        return Optional.empty();
+    }
 
     /**
      * Check if this source is a player.
@@ -63,7 +73,7 @@ public interface CommandSource extends PermissionSubject {
      * @return true if this is a player
      */
     default boolean isPlayer() {
-        return asPlayer().isPresent();
+        return this.asPlayer().isPresent();
     }
 
     /**
@@ -71,41 +81,7 @@ public interface CommandSource extends PermissionSubject {
      *
      * @return true if this is the console
      */
-    boolean isConsole();
-
-    /**
-     * {@inheritDoc}
-     *
-     * <p>For command sources:</p>
-     * <ul>
-     *   <li>Console: Returns {@link Tristate#TRUE} for all permissions by default</li>
-     *   <li>Player: Delegates to the player's permission function</li>
-     * </ul>
-     */
-    @Override
-    @Nonnull
-    default Tristate getPermissionValue(@Nonnull String permission) {
-        Optional<Player> player = asPlayer();
-        if (player.isPresent()) {
-            return player.get().getPermissionValue(permission);
-        }
-        // Console has all permissions by default
-        return getPermissionFunction().getPermissionValue(permission);
-    }
-
-    /**
-     * {@inheritDoc}
-     *
-     * <p>By default, console sources have all permissions.</p>
-     */
-    @Override
-    default boolean hasPermission(@Nonnull String permission) {
-        Optional<Player> player = asPlayer();
-        if (player.isPresent()) {
-            return player.get().hasPermission(permission);
-        }
-        // Console has all permissions
-        return true;
+    default boolean isConsole() {
+        return !isPlayer();
     }
 }
-

@@ -66,13 +66,13 @@ Create a main class annotated with `@Plugin`:
 ```java
 package com.example.myplugin;
 
-import me.internalizable.numdrassl.api.Numdrassl;
 import me.internalizable.numdrassl.api.ProxyServer;
 import me.internalizable.numdrassl.api.event.Subscribe;
 import me.internalizable.numdrassl.api.event.proxy.ProxyInitializeEvent;
+import me.internalizable.numdrassl.api.event.proxy.ProxyShutdownEvent;
+import me.internalizable.numdrassl.api.plugin.Inject;
 import me.internalizable.numdrassl.api.plugin.Plugin;
 import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 @Plugin(
     id = "my-plugin",
@@ -83,31 +83,82 @@ import org.slf4j.LoggerFactory;
 )
 public class MyPlugin {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(MyPlugin.class);
+    @Inject
+    private ProxyServer server;
+    
+    @Inject
+    private Logger logger;
 
     @Subscribe
     public void onProxyInitialize(ProxyInitializeEvent event) {
-        LOGGER.info("My plugin has been enabled!");
-        
-        // Access the proxy server
-        ProxyServer proxy = Numdrassl.getProxy();
+        logger.info("My plugin has been enabled!");
         
         // Register event listeners
-        proxy.getEventManager().register(this, new MyEventListener());
+        server.getEventManager().register(this, new MyEventListener());
         
         // Register commands
-        proxy.getCommandManager().register(this, "hello", (source, args) -> {
+        server.getCommandManager().register(this, "hello", (source, args) -> {
             source.sendMessage("Hello from my plugin!");
             return me.internalizable.numdrassl.api.command.CommandResult.success();
         });
     }
 
     @Subscribe
-    public void onProxyShutdown(me.internalizable.numdrassl.api.event.proxy.ProxyShutdownEvent event) {
-        LOGGER.info("My plugin is shutting down!");
+    public void onProxyShutdown(ProxyShutdownEvent event) {
+        logger.info("My plugin is shutting down!");
     }
 }
 ```
+
+### Dependency Injection
+
+Numdrassl supports automatic dependency injection via the `@Inject` annotation:
+
+```java
+@Plugin(id = "my-plugin", name = "My Plugin", version = "1.0.0")
+public class MyPlugin {
+
+    // Field injection
+    @Inject private ProxyServer server;
+    @Inject private Logger logger;
+    @Inject private MessagingService messaging;
+    @Inject private EventManager eventManager;
+    @Inject private CommandManager commandManager;
+    @Inject private Scheduler scheduler;
+    
+    @Inject @DataDirectory
+    private Path dataDirectory;  // Plugin's data folder
+}
+```
+
+Or use constructor injection:
+
+```java
+@Plugin(id = "my-plugin", name = "My Plugin", version = "1.0.0")
+public class MyPlugin {
+
+    private final ProxyServer server;
+    private final Logger logger;
+
+    @Inject
+    public MyPlugin(ProxyServer server, Logger logger) {
+        this.server = server;
+        this.logger = logger;
+    }
+}
+```
+
+**Available Injectables:**
+
+| Type                          | Description                        |
+|-------------------------------|------------------------------------|
+| `ProxyServer`                 | The proxy server instance          |
+| `EventManager`                | Event registration and dispatch    |
+| `CommandManager`              | Command registration               |
+| `MessagingService`            | Cross-proxy messaging              |
+| `Scheduler`                   | Task scheduling                    |
+| `Logger`                      | Plugin-specific SLF4J logger       |
+| `Path` with `@DataDirectory`  | Plugin's data directory            |
 
 ### Installing Your Plugin
 
@@ -148,6 +199,12 @@ public class MyPlugin {
 ## Event System
 
 The event system allows plugins to react to proxy events and modify behavior.
+
+> **Important Annotation Distinction:**
+> - `@Subscribe` (from `api.event`) - For local proxy events (player joins, commands, etc.)
+> - `@MessageSubscribe` (from `api.messaging.annotation`) - For cross-proxy Redis messages
+>
+> This section covers `@Subscribe` for local events. See [Cluster Messaging](#cross-proxy-messaging) for `@MessageSubscribe`.
 
 ### Listening for Events
 
@@ -532,6 +589,119 @@ public void onPreConnect(ServerPreConnectEvent event) {
     // Your logic here
 }
 ```
+
+---
+
+## Cross-Proxy Messaging
+
+When running in cluster mode (multiple proxies with Redis), you can send messages between proxies.
+
+> **Note:** Use `@MessageSubscribe` from `api.messaging.annotation` for cross-proxy messages.
+> This is different from `@Subscribe` which is for local events.
+
+### Programmatic API
+
+```java
+import me.internalizable.numdrassl.api.messaging.MessagingService;
+import me.internalizable.numdrassl.api.messaging.channel.Channels;
+import me.internalizable.numdrassl.api.messaging.message.BroadcastMessage;
+import me.internalizable.numdrassl.api.messaging.channel.BroadcastType;
+
+// Get the messaging service
+MessagingService messaging = Numdrassl.getProxy().getMessagingService();
+
+// Subscribe to cross-proxy chat
+messaging.subscribe(Channels.CHAT, ChatMessage.class, (channel, msg) -> {
+    logger.info("Chat from {}: {}", msg.sourceProxyId(), msg.message());
+});
+
+// Send a broadcast to all proxies
+messaging.publish(Channels.BROADCAST, new BroadcastMessage(
+    proxyId, Instant.now(), "Server restart in 5 minutes", BroadcastType.WARNING
+));
+
+// Plugin-specific messages
+messaging.subscribePlugin("my-plugin", "events", MyEventData.class,
+    (sourceProxyId, data) -> handleEvent(data));
+
+messaging.publishPlugin("my-plugin", "events", new MyEventData("something happened"));
+```
+
+### Annotation-Based API
+
+```java
+import me.internalizable.numdrassl.api.event.Subscribe;  // For local events
+import me.internalizable.numdrassl.api.event.proxy.ProxyInitializeEvent;
+import me.internalizable.numdrassl.api.messaging.annotation.MessageSubscribe;  // For cross-proxy messages
+import me.internalizable.numdrassl.api.messaging.channel.SystemChannel;
+import me.internalizable.numdrassl.api.messaging.message.ChatMessage;
+import me.internalizable.numdrassl.api.messaging.message.HeartbeatMessage;
+import me.internalizable.numdrassl.api.plugin.Inject;
+import me.internalizable.numdrassl.api.plugin.Plugin;
+
+@Plugin(id = "my-plugin", name = "My Plugin", version = "1.0.0")
+public class MyPlugin {
+
+    @Inject
+    private MessagingService messaging;
+
+    @Subscribe  // Local event - registers message listeners on proxy init
+    public void onInit(ProxyInitializeEvent event) {
+        // Register this class for @MessageSubscribe methods
+        messaging.registerListener(this);
+    }
+
+    // Cross-proxy chat (from other proxies)
+    @MessageSubscribe(SystemChannel.CHAT)
+    public void onCrossProxyChat(ChatMessage msg) {
+        logger.info("Chat from proxy {}: {}", msg.sourceProxyId(), msg.message());
+    }
+
+    // Custom plugin channel - plugin ID inferred from @Plugin annotation
+    @MessageSubscribe(channel = "game-events")
+    public void onGameEvent(GameEventData data) {
+        logger.info("Game event: {}", data);
+    }
+
+    // Include messages from this proxy too
+    @MessageSubscribe(value = SystemChannel.HEARTBEAT, includeSelf = true)
+    public void onAnyHeartbeat(HeartbeatMessage msg) {
+        logger.info("Proxy {} is alive with {} players", 
+            msg.sourceProxyId(), msg.playerCount());
+    }
+}
+```
+
+### Custom Message Types
+
+Define your own message types for plugin-specific communication:
+
+```java
+// Your custom data class
+public record ScoreUpdate(String playerName, int score, String gameMode) {}
+
+// Publishing
+messaging.publishPlugin("my-plugin", "scores", new ScoreUpdate("Steve", 100, "survival"));
+
+// Subscribing
+@MessageSubscribe(channel = "scores")
+public void onScoreUpdate(ScoreUpdate update) {
+    logger.info("{} scored {} in {}", 
+        update.playerName(), update.score(), update.gameMode());
+}
+```
+
+### System Channels
+
+| Channel | Message Type | Purpose |
+|---------|--------------|---------|
+| `SystemChannel.HEARTBEAT` | `HeartbeatMessage` | Proxy liveness |
+| `SystemChannel.CHAT` | `ChatMessage` | Cross-proxy chat |
+| `SystemChannel.BROADCAST` | `BroadcastMessage` | Announcements |
+| `SystemChannel.PLAYER_COUNT` | `PlayerCountMessage` | Player sync |
+| `SystemChannel.TRANSFER` | `TransferMessage` | Cross-proxy transfers |
+
+For more details, see [Cluster Messaging Architecture](CLUSTER_MESSAGING_ARCHITECTURE.md).
 
 ---
 

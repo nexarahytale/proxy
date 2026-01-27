@@ -1,8 +1,12 @@
 package me.internalizable.numdrassl.plugin.server;
 
 import me.internalizable.numdrassl.api.player.Player;
+import me.internalizable.numdrassl.api.plugin.messaging.ChannelIdentifier;
 import me.internalizable.numdrassl.api.server.PingResult;
 import me.internalizable.numdrassl.api.server.RegisteredServer;
+import me.internalizable.numdrassl.plugin.player.NumdrasslPlayer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
 import java.net.InetSocketAddress;
@@ -20,6 +24,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class NumdrasslRegisteredServer implements RegisteredServer {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(NumdrasslRegisteredServer.class);
+
     private final String name;
     private final InetSocketAddress address;
     private final Set<Player> connectedPlayers = ConcurrentHashMap.newKeySet();
@@ -29,6 +35,7 @@ public final class NumdrasslRegisteredServer implements RegisteredServer {
         this.name = Objects.requireNonNull(name, "name");
         this.address = Objects.requireNonNull(address, "address");
     }
+
 
     // ==================== Server Identity ====================
 
@@ -100,6 +107,23 @@ public final class NumdrasslRegisteredServer implements RegisteredServer {
     public CompletableFuture<PingResult> ping() {
         // TODO: Implement actual server ping via QUIC
         return CompletableFuture.completedFuture(PingResult.success(-1));
+    }
+
+    // ==================== Plugin Messaging ====================
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Sends a plugin message to this backend server.</p>
+     */
+    @Override
+    public boolean sendPluginMessage(@Nonnull ChannelIdentifier channel, @Nonnull byte[] data) {
+        Objects.requireNonNull(channel, "channel");
+        Objects.requireNonNull(data, "data");
+
+        // TODO: Implement plugin messaging via Redis pub/sub
+        LOGGER.debug("sendPluginMessage not implemented for {}: use Redis for cross-proxy messaging", name);
+        return false;
     }
 
     // ==================== Object Methods ====================

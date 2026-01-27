@@ -9,6 +9,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import me.internalizable.numdrassl.pipeline.handler.BackendConnectionHandler;
 import me.internalizable.numdrassl.pipeline.handler.ClientAuthenticationHandler;
+import me.internalizable.numdrassl.profiling.ProxyMetrics;
 import me.internalizable.numdrassl.server.ProxyCore;
 import me.internalizable.numdrassl.session.ProxySession;
 import me.internalizable.numdrassl.session.SessionState;
@@ -46,6 +47,7 @@ public final class ClientPacketHandler extends SimpleChannelInboundHandler<Objec
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Object msg) throws Exception {
         if (msg instanceof ByteBuf raw) {
+            ProxyMetrics.getInstance().recordPacketFromClient("RawPacket", raw.readableBytes());
             handleRawPacket(raw);
             return;
         }
@@ -55,7 +57,7 @@ public final class ClientPacketHandler extends SimpleChannelInboundHandler<Objec
                 session.getSessionId(), msg.getClass().getName());
             return;
         }
-
+        ProxyMetrics.getInstance().recordPacketFromClient(packet.getClass().getSimpleName(), 0);
         dispatchPacket(packet);
     }
 
@@ -65,7 +67,8 @@ public final class ClientPacketHandler extends SimpleChannelInboundHandler<Objec
         if (session.getState() == SessionState.CONNECTED) {
             session.sendToBackend(raw.retain());
         } else {
-            raw.release();
+            LOGGER.debug("Session {}: Dropping raw packet - not connected (state={})",
+                session.getSessionId(), session.getState());
         }
     }
 
@@ -110,7 +113,6 @@ public final class ClientPacketHandler extends SimpleChannelInboundHandler<Objec
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        LOGGER.debug("Session {}: Client stream active", session.getSessionId());
         super.channelActive(ctx);
     }
 
@@ -125,6 +127,8 @@ public final class ClientPacketHandler extends SimpleChannelInboundHandler<Objec
         session.close();
         proxyCore.getSessionManager().removeSession(session);
         proxyCore.getEventManager().dispatchSessionClosed(session);
+        ProxyMetrics.getInstance().recordConnectionClosed();
+        ProxyMetrics.getInstance().decrementActiveSession();
     }
 
     @Override

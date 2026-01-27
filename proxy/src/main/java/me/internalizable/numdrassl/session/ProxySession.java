@@ -1,11 +1,16 @@
 package me.internalizable.numdrassl.session;
 
 import com.hypixel.hytale.protocol.Packet;
+import com.hypixel.hytale.protocol.packets.connection.ClientType;
 import com.hypixel.hytale.protocol.packets.connection.Connect;
+import com.hypixel.hytale.protocol.packets.connection.Disconnect;
+import com.hypixel.hytale.protocol.packets.connection.DisconnectType;
+import com.hypixel.hytale.protocol.packets.interface_.ServerMessage;
 import io.netty.buffer.ByteBuf;
 import io.netty.incubator.codec.quic.QuicChannel;
 import io.netty.incubator.codec.quic.QuicStreamChannel;
 import me.internalizable.numdrassl.api.chat.ChatMessageBuilder;
+import me.internalizable.numdrassl.api.player.Player;
 import me.internalizable.numdrassl.auth.CertificateExtractor;
 import me.internalizable.numdrassl.config.BackendServer;
 import me.internalizable.numdrassl.server.ProxyCore;
@@ -23,7 +28,9 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.security.cert.X509Certificate;
 import java.util.Objects;
+import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -62,6 +69,12 @@ public final class ProxySession {
     private final AtomicReference<SessionState> state = new AtomicReference<>(SessionState.HANDSHAKING);
     private final AtomicReference<PlayerIdentity> identity = new AtomicReference<>(PlayerIdentity.unknown());
     private final AtomicReference<BackendServer> currentBackend = new AtomicReference<>();
+
+    // Cached API player instance
+    private final AtomicReference<Player> cachedPlayer = new AtomicReference<>();
+
+    // Message queue for messages sent before player is fully connected
+    private final Queue<ServerMessage> pendingMessages = new ConcurrentLinkedQueue<>();
 
     // Transfer flag
     private volatile boolean serverTransfer = false;
@@ -132,7 +145,7 @@ public final class ProxySession {
 
     @Nullable
     public String getProtocolHash() {
-        return identity.get().protocolHash();
+        return identity.get().clientVersion();
     }
 
     @Nullable
@@ -338,6 +351,7 @@ public final class ProxySession {
 
     /**
      * Sends a plain text chat message to the player.
+     * If the player is not fully connected, the message is queued for later delivery.
      *
      * @param message the message to send
      */
@@ -348,6 +362,7 @@ public final class ProxySession {
 
     /**
      * Sends a formatted chat message to the player.
+     * If the player is not fully connected, the message is queued for later delivery.
      *
      * <p>Example usage:</p>
      * <pre>{@code
@@ -360,7 +375,55 @@ public final class ProxySession {
      */
     public void sendChatMessage(@Nonnull ChatMessageBuilder builder) {
         Objects.requireNonNull(builder, "builder");
-        sendToClient(ChatMessageConverter.toServerMessage(builder));
+        ServerMessage msg = ChatMessageConverter.toServerMessage(builder);
+
+        // If player is connected, send immediately; otherwise queue
+        if (state.get() == SessionState.CONNECTED) {
+            sendToClient(msg);
+        } else {
+            pendingMessages.offer(msg);
+            LOGGER.debug("Session {}: Queued message for delivery after connection", id);
+        }
+    }
+
+    /**
+     * Flushes any queued messages to the player.
+     * Should be called when the player becomes fully connected.
+     */
+    public void flushPendingMessages() {
+        ServerMessage msg;
+        int count = 0;
+        while ((msg = pendingMessages.poll()) != null) {
+            sendToClient(msg);
+            count++;
+        }
+        if (count > 0) {
+            LOGGER.debug("Session {}: Flushed {} pending messages", id, count);
+        }
+    }
+
+    // ==================== Player API Caching ====================
+
+    /**
+     * Gets the cached Player API instance, or null if not yet set.
+     * Use {@link #setCachedPlayer(Player)} to set the cached player.
+     *
+     * @return the cached player or null
+     */
+    @Nullable
+    public Player getCachedPlayer() {
+        return cachedPlayer.get();
+    }
+
+    /**
+     * Sets the cached Player API instance for this session.
+     * This should be called once when the player is first created.
+     *
+     * @param player the player to cache
+     */
+    public void setCachedPlayer(@Nonnull Player player) {
+        Objects.requireNonNull(player, "player");
+        cachedPlayer.set(player);
     }
 
     // ==================== Lifecycle ====================
@@ -373,7 +436,15 @@ public final class ProxySession {
         LOGGER.info("Session {} disconnecting: {}", id, reason);
 
         state.set(SessionState.DISCONNECTED);
-        channels.closeAll();
+
+        QuicStreamChannel stream = channels.clientStream();
+        if (stream != null && stream.isActive()) {
+            Disconnect packet = new Disconnect(reason, DisconnectType.Disconnect);
+            stream.writeAndFlush(packet).addListener(future -> channels.closeAll());
+        } else {
+            channels.closeAll();
+        }
+
         proxyCore.getSessionManager().removeSession(this);
     }
 
@@ -452,10 +523,14 @@ public final class ProxySession {
     private Connect createTransferConnect() {
         PlayerIdentity id = identity.get();
         Connect connect = new Connect();
-        connect.uuid = id.uuid();
-        connect.username = id.username();
-        connect.protocolHash = id.protocolHash();
+        connect.protocolCrc = id.protocolCrc();
+        connect.protocolBuildNumber = id.protocolBuildNumber();
+        connect.clientVersion = id.clientVersion() != null ? id.clientVersion() : "";
+        connect.uuid = id.uuid() != null ? id.uuid() : new UUID(0L, 0L);
+        connect.username = id.username() != null ? id.username() : "";
         connect.identityToken = id.identityToken();
+        connect.language = id.language() != null ? id.language() : "";
+        connect.clientType = id.clientType() != null ? id.clientType() : ClientType.Game;
         return connect;
     }
 
