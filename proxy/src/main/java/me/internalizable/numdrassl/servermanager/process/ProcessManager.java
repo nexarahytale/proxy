@@ -102,7 +102,6 @@ public class ProcessManager {
         command.add("-XX:+UseG1GC");
         command.add("-XX:+ParallelRefProcEnabled");
         command.add("-XX:MaxGCPauseMillis=200");
-        command.add("-Djava.net.preferIPv4Stack=true");
 
         // Additional JVM args
         command.addAll(jvmArgs);

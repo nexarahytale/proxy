@@ -135,13 +135,18 @@ public class Bridge extends JavaPlugin {
      * Handles player connection setup - verifies the referral from the proxy.
      */
     private void onPlayerSetupConnect(PlayerSetupConnectEvent event) {
+        getLogger().at(Level.INFO).log("PlayerSetupConnectEvent received for " + event.getUsername() + " (" + event.getUuid() + ")");
+        
         byte[] data = event.getReferralData();
 
         if (data == null) {
+            getLogger().at(Level.WARNING).log("No referral data received for " + event.getUsername());
             event.setCancelled(true);
             event.setReason("You have to go through our main proxy to join this server.");
             return;
         }
+        
+        getLogger().at(Level.INFO).log("Referral data received: " + data.length + " bytes");
 
         verifyPlayerReferral(event, data);
     }
@@ -153,20 +158,24 @@ public class Bridge extends JavaPlugin {
         try {
             ByteBuf buf = Unpooled.copiedBuffer(data);
             byte[] secret = getProxySecret();
+            String serverName = this.getServerName();
+            
+            getLogger().at(Level.INFO).log("Validating referral for " + event.getUsername() + " -> server: " + serverName);
 
             SecretMessageUtil.BackendPlayerInfoMessage message = SecretMessageUtil.validateAndDecodePlayerInfoReferral(
                     buf,
                     event.getUuid(),
                     event.getUsername(),
-                    this.getServerName(),
+                    serverName,
                     secret
             );
 
             if (message == null) {
+                getLogger().at(Level.WARNING).log("Referral validation FAILED for " + event.getUsername());
                 event.setCancelled(true);
                 event.setReason("Could not verify your player information. Make sure you are connecting through the correct proxy.");
             } else {
-                getLogger().at(Level.INFO).log("Player " + event.getUsername() + " authenticated via proxy");
+                getLogger().at(Level.INFO).log("Player " + event.getUsername() + " authenticated via proxy (backend: " + message.backendName() + ")");
             }
         } catch (Throwable t) {
             getLogger().at(Level.SEVERE).log("Error verifying player information: " + t.getMessage());

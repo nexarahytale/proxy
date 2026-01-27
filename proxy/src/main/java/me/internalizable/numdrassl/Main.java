@@ -83,7 +83,7 @@ public final class Main {
 
     private static void startConsoleHandler() {
         Thread consoleThread = new Thread(Main::runConsoleLoop, "Console-Handler");
-        consoleThread.setDaemon(true);
+        consoleThread.setDaemon(false);  // Keep JVM alive
         consoleThread.start();
     }
 

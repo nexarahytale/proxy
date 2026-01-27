@@ -391,6 +391,14 @@ public final class BackendConnector {
         Connect proxyConnect = new Connect(original);
         proxyConnect.referralData = referralData;
         proxyConnect.referralSource = createReferralSource();
+        // Keep the original identityToken - the backend may need it for initial auth
+        // The referralData provides additional verification for the Bridge plugin
+        
+        LOGGER.info("Session {}: Connect packet details - uuid={}, username={}, clientVersion={}, protocolCrc={}, hasIdentityToken={}, referralDataLen={}",
+            session.getSessionId(), proxyConnect.uuid, proxyConnect.username, 
+            proxyConnect.clientVersion, proxyConnect.protocolCrc,
+            proxyConnect.identityToken != null,
+            proxyConnect.referralData != null ? proxyConnect.referralData.length : 0);
 
         LOGGER.debug("Session {}: Sending Connect to backend - protocolCrc={}, buildNumber={}, clientVersion='{}', uuid={}, username={}, referralSource={}:{}",
             session.getSessionId(), proxyConnect.protocolCrc, proxyConnect.protocolBuildNumber,

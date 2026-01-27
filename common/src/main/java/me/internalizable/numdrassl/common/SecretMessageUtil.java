@@ -217,10 +217,13 @@ public class SecretMessageUtil {
                 return null;
             }
 
+            // Case-insensitive backend name comparison
             if (!backendName.equalsIgnoreCase(expectedBackend)) {
-                LOGGER.warning("Backend mismatch: got " + backendName + ", expected " + expectedBackend);
+                LOGGER.warning("Backend mismatch: got '" + backendName + "', expected '" + expectedBackend + "'");
                 return null;
             }
+            
+            LOGGER.info("Referral validation successful for " + username + " -> " + backendName);
 
             return new BackendPlayerInfoMessage(uuid, username, backendName, remoteAddress, timestamp);
 
