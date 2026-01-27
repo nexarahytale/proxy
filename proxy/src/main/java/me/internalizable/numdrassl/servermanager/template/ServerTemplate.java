@@ -16,17 +16,23 @@ import java.util.Objects;
  * Represents a server template on disk.
  *
  * <p>Templates are stored in {@code servers/templates/<name>/} and contain
- * all files needed to spawn a dynamic server instance.</p>
+ * all files needed to spawn a dynamic Hytale server instance.</p>
  *
- * <h2>Required Structure</h2>
+ * <h2>Required Structure (Hytale Server)</h2>
  * <pre>
  * servers/templates/bedwars/
  * ├── template.yml          # Template metadata (required)
- * ├── server.properties     # Hytale server config (required)
- * ├── startup.sh            # Startup script (optional)
+ * ├── HytaleServer.jar      # Hytale server JAR (required)
+ * ├── Assets.zip            # Game assets (required)
+ * ├── config.json           # Hytale server config (optional, auto-generated)
  * ├── plugins/              # Plugin directory (optional)
- * │   └── NumdrasslBridge.jar
- * └── world/                # World data (optional, if not reset-on-spawn)
+ * │   └── bridge.jar        # Numdrassl Bridge plugin
+ * └── universe/             # World data (optional)
+ * </pre>
+ *
+ * <h2>Hytale Server Startup</h2>
+ * <pre>
+ * java -XX:AOTCache=HytaleServer.aot -jar HytaleServer.jar --assets Assets.zip --bind PORT
  * </pre>
  */
 public class ServerTemplate {
@@ -34,10 +40,13 @@ public class ServerTemplate {
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerTemplate.class);
 
     private static final String TEMPLATE_METADATA_FILE = "template.yml";
-    private static final String SERVER_PROPERTIES_FILE = "server.properties";
+    private static final String CONFIG_JSON_FILE = "config.json";
+    private static final String HYTALE_SERVER_JAR = "HytaleServer.jar";
+    private static final String ASSETS_ZIP = "Assets.zip";
     private static final String STARTUP_SCRIPT = "startup.sh";
     private static final String PLUGINS_DIR = "plugins";
-    private static final String WORLD_DIR = "world";
+    private static final String UNIVERSE_DIR = "universe";
+    private static final String BRIDGE_CONFIG_DIR = "plugins/Bridge";
 
     private final String name;
     private final Path templatePath;
@@ -91,7 +100,7 @@ public class ServerTemplate {
     }
 
     /**
-     * Validate the template structure.
+     * Validate the template structure for Hytale servers.
      *
      * @return true if template is valid
      */
@@ -103,42 +112,48 @@ public class ServerTemplate {
             return false;
         }
 
-        // Check for server.properties (required for Hytale)
-        Path serverProps = templatePath.resolve(SERVER_PROPERTIES_FILE);
-        if (!Files.exists(serverProps)) {
-            validationErrors.add("Missing required file: " + SERVER_PROPERTIES_FILE);
-        }
-
         // Check for template.yml (recommended)
         Path templateYml = templatePath.resolve(TEMPLATE_METADATA_FILE);
         if (!Files.exists(templateYml)) {
             LOGGER.warn("Template '{}' missing template.yml, using defaults", name);
         }
 
-        // Check for startup script or server jar
-        Path startupScript = templatePath.resolve(STARTUP_SCRIPT);
-        boolean hasStartup = Files.exists(startupScript);
-        boolean hasServerJar = metadata != null && metadata.getServerJar() != null
-                && Files.exists(templatePath.resolve(metadata.getServerJar()));
-
-        if (!hasStartup && !hasServerJar) {
-            // Look for any .jar file
+        // Check for HytaleServer.jar
+        String serverJar = metadata != null && metadata.getServerJar() != null 
+                ? metadata.getServerJar() 
+                : "HytaleServer.jar";
+        Path serverJarPath = templatePath.resolve(serverJar);
+        if (!Files.exists(serverJarPath)) {
+            // Look for any server jar
             try (DirectoryStream<Path> stream = Files.newDirectoryStream(templatePath, "*.jar")) {
-                boolean foundJar = stream.iterator().hasNext();
+                boolean foundJar = false;
+                for (Path jar : stream) {
+                    String jarName = jar.getFileName().toString().toLowerCase();
+                    if (jarName.contains("server") || jarName.contains("hytale")) {
+                        foundJar = true;
+                        break;
+                    }
+                }
                 if (!foundJar) {
-                    validationErrors.add("No startup.sh or server JAR found");
+                    validationErrors.add("Missing HytaleServer.jar or equivalent server JAR");
                 }
             } catch (IOException e) {
                 validationErrors.add("Failed to scan for JAR files: " + e.getMessage());
             }
         }
 
+        // Check for Assets.zip (required for Hytale)
+        Path assetsZip = templatePath.resolve("Assets.zip");
+        if (!Files.exists(assetsZip)) {
+            LOGGER.warn("Template '{}' missing Assets.zip - server may fail to start", name);
+        }
+
         // Check plugins directory for Bridge
         Path pluginsDir = templatePath.resolve(PLUGINS_DIR);
         if (Files.isDirectory(pluginsDir)) {
-            Path bridgeJar = pluginsDir.resolve("NumdrasslBridge.jar");
+            Path bridgeJar = pluginsDir.resolve("bridge-1.0-SNAPSHOT.jar");
             if (!Files.exists(bridgeJar)) {
-                LOGGER.warn("Template '{}' missing NumdrasslBridge.jar in plugins/", name);
+                LOGGER.warn("Template '{}' missing bridge-1.0-SNAPSHOT.jar in plugins/", name);
             }
         }
 
@@ -159,7 +174,7 @@ public class ServerTemplate {
      * Clone this template to a destination directory with config overrides.
      *
      * @param destination target directory
-     * @param configOverrides properties to override in server.properties
+     * @param configOverrides properties containing server-id, port, etc.
      * @throws IOException if cloning fails
      */
     public void cloneTo(@Nonnull Path destination, @Nullable java.util.Properties configOverrides) throws IOException {
@@ -188,18 +203,40 @@ public class ServerTemplate {
             }
         });
 
-        // Apply config overrides to server.properties
-        if (configOverrides != null && !configOverrides.isEmpty()) {
-            Path propsPath = destination.resolve(SERVER_PROPERTIES_FILE);
-            if (Files.exists(propsPath)) {
-                java.util.Properties props = new java.util.Properties();
-                try (var reader = Files.newBufferedReader(propsPath)) {
-                    props.load(reader);
-                }
-                props.putAll(configOverrides);
-                try (var writer = Files.newBufferedWriter(propsPath)) {
-                    props.store(writer, "Generated by Numdrassl Server Manager");
-                }
+        // Generate/update Hytale config.json if needed
+        if (configOverrides != null) {
+            String serverId = configOverrides.getProperty("server-id");
+            String maxPlayers = configOverrides.getProperty("max-players", "100");
+            
+            // Create config.json for Hytale server
+            Path configPath = destination.resolve(CONFIG_JSON_FILE);
+            if (!Files.exists(configPath)) {
+                String configJson = String.format("""
+                    {
+                      "Version": 3,
+                      "ServerName": "%s",
+                      "MOTD": "",
+                      "Password": "",
+                      "MaxPlayers": %s,
+                      "MaxViewRadius": 32,
+                      "Defaults": {
+                        "World": "default",
+                        "GameMode": "Adventure"
+                      },
+                      "ConnectionTimeouts": {
+                        "JoinTimeouts": {}
+                      },
+                      "RateLimit": {},
+                      "Modules": {},
+                      "LogLevels": {},
+                      "Mods": {},
+                      "DisplayTmpTagsInStrings": false,
+                      "PlayerStorage": {
+                        "Type": "Hytale"
+                      }
+                    }
+                    """, serverId != null ? serverId : name, maxPlayers);
+                Files.writeString(configPath, configJson);
             }
         }
 
@@ -266,12 +303,21 @@ public class ServerTemplate {
     }
 
     /**
-     * Check if template has a world directory.
+     * Check if template has a universe directory (Hytale world data).
      *
-     * @return true if world/ exists
+     * @return true if universe/ exists
+     */
+    public boolean hasUniverse() {
+        return Files.isDirectory(templatePath.resolve(UNIVERSE_DIR));
+    }
+
+    /**
+     * Check if template has a world directory (legacy).
+     *
+     * @return true if universe/ exists
      */
     public boolean hasWorld() {
-        return Files.isDirectory(templatePath.resolve(WORLD_DIR));
+        return hasUniverse();
     }
 
     /**

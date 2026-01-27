@@ -158,8 +158,23 @@ public class InstanceManager {
                         null
                 );
 
-                // Inject port into server.properties
-                injectServerProperties(serverDir, serverId, port);
+                // Build Hytale server arguments
+                List<String> serverArgs = new ArrayList<>();
+                if (staticConfig.getServerArgs() != null && !staticConfig.getServerArgs().isEmpty()) {
+                    serverArgs.addAll(staticConfig.getServerArgs());
+                } else {
+                    // Default Hytale server arguments
+                    serverArgs.add("--assets");
+                    serverArgs.add("Assets.zip");
+                    serverArgs.add("--auth-mode");
+                    serverArgs.add("insecure");
+                    serverArgs.add("--transport");
+                    serverArgs.add("QUIC");
+                }
+                
+                // Add --bind for port (Hytale uses --bind to set port)
+                serverArgs.add("--bind");
+                serverArgs.add(String.valueOf(port));
 
                 // Start process
                 ManagedProcess process = processManager.spawnServer(
@@ -168,6 +183,7 @@ public class InstanceManager {
                         staticConfig.getMemory(),
                         null,
                         staticConfig.getJvmArgs(),
+                        serverArgs,
                         staticConfig.getEnvironment(),
                         false
                 );
@@ -279,6 +295,26 @@ public class InstanceManager {
                 environment.put("NUMDRASSL_PORT", String.valueOf(port));
                 environment.put("NUMDRASSL_TEMPLATE", templateName);
 
+                // Build Hytale server arguments
+                List<String> serverArgs = new ArrayList<>();
+                
+                // Get startup args from template metadata
+                if (template.getMetadata() != null && template.getMetadata().getStartupArgs() != null) {
+                    serverArgs.addAll(template.getMetadata().getStartupArgs());
+                } else {
+                    // Default Hytale server arguments
+                    serverArgs.add("--assets");
+                    serverArgs.add("Assets.zip");
+                    serverArgs.add("--auth-mode");
+                    serverArgs.add("insecure");
+                    serverArgs.add("--transport");
+                    serverArgs.add("QUIC");
+                }
+                
+                // Add --bind for port (Hytale uses --bind to set port)
+                serverArgs.add("--bind");
+                serverArgs.add(String.valueOf(port));
+
                 // Start process
                 String memory = options.getMemory() != null
                         ? options.getMemory()
@@ -290,6 +326,7 @@ public class InstanceManager {
                         memory,
                         template.getMetadata() != null ? template.getMetadata().getServerJar() : null,
                         templateConfig.getJvmArgs(),
+                        serverArgs,
                         environment,
                         true
                 );
@@ -328,25 +365,6 @@ public class InstanceManager {
         return -1;
     }
 
-    private void injectServerProperties(Path serverDir, String serverId, int port) throws IOException {
-        Path propsPath = serverDir.resolve("server.properties");
-        if (!Files.exists(propsPath)) {
-            return;
-        }
-
-        Properties props = new Properties();
-        try (var reader = Files.newBufferedReader(propsPath)) {
-            props.load(reader);
-        }
-
-        props.setProperty("server-port", String.valueOf(port));
-        props.setProperty("server-id", serverId);
-
-        try (var writer = Files.newBufferedWriter(propsPath)) {
-            props.store(writer, "Modified by Numdrassl Server Manager");
-        }
-    }
-
     private void waitForServerReady(ServerInstance instance) throws InterruptedException {
         int timeout = config.getProcessStartTimeoutSeconds();
         long deadline = System.currentTimeMillis() + (timeout * 1000L);
@@ -357,7 +375,7 @@ public class InstanceManager {
                 throw new RuntimeException("Server process exited during startup");
             }
 
-            // Check for ready indicator in logs
+            // Check for ready indicator in logs (Hytale server outputs "Listening on")
             if (instance.getProcess() != null) {
                 List<String> logs = instance.getProcess().getRecentLogs(50);
                 for (String line : logs) {

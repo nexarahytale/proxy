@@ -56,13 +56,14 @@ public class ProcessManager {
     }
 
     /**
-     * Spawn a server process.
+     * Spawn a Hytale server process.
      *
      * @param serverId unique server identifier
      * @param workingDir working directory for the process
      * @param memory memory allocation (e.g., "2G")
-     * @param serverJar path to server JAR (relative to workingDir)
+     * @param serverJar path to server JAR (relative to workingDir), defaults to HytaleServer.jar
      * @param jvmArgs additional JVM arguments
+     * @param serverArgs Hytale server arguments (--assets, --auth-mode, --transport, etc.)
      * @param environment environment variables
      * @param isDynamic whether this is a dynamic server
      * @return the managed process
@@ -75,6 +76,7 @@ public class ProcessManager {
             @Nonnull String memory,
             @Nullable String serverJar,
             @Nonnull List<String> jvmArgs,
+            @Nonnull List<String> serverArgs,
             @Nonnull Map<String, String> environment,
             boolean isDynamic) throws IOException {
 
@@ -90,38 +92,44 @@ public class ProcessManager {
             throw new IOException("Working directory does not exist: " + workingDir);
         }
 
-        // Check for startup script first
-        Path startupScript = workingDir.resolve("startup.sh");
-        boolean useStartupScript = Files.exists(startupScript);
-
+        // Build Java command for Hytale server
         List<String> command = new ArrayList<>();
+        command.add(javaPath);
+        command.add("-Xms" + memory);
+        command.add("-Xmx" + memory);
 
-        if (useStartupScript) {
-            // Use startup script
-            command.add("/bin/bash");
-            command.add(startupScript.toString());
-        } else {
-            // Build Java command
-            command.add(javaPath);
-            command.add("-Xms" + memory);
-            command.add("-Xmx" + memory);
+        // Default JVM args for Hytale servers
+        command.add("-XX:+UseG1GC");
+        command.add("-XX:+ParallelRefProcEnabled");
+        command.add("-XX:MaxGCPauseMillis=200");
+        command.add("-Djava.net.preferIPv4Stack=true");
 
-            // Default JVM args for Hytale servers
-            command.add("-XX:+UseG1GC");
-            command.add("-XX:+ParallelRefProcEnabled");
-            command.add("-XX:MaxGCPauseMillis=200");
-            command.add("-Djava.net.preferIPv4Stack=true");
+        // Additional JVM args
+        command.addAll(jvmArgs);
 
-            // Additional JVM args
-            command.addAll(jvmArgs);
-
-            // Server JAR
-            String jar = serverJar != null ? serverJar : findServerJar(workingDir);
+        // Server JAR (default: HytaleServer.jar)
+        String jar = serverJar != null ? serverJar : "HytaleServer.jar";
+        if (!Files.exists(workingDir.resolve(jar))) {
+            // Try to find any server jar
+            jar = findServerJar(workingDir);
             if (jar == null) {
                 throw new IOException("No server JAR found in " + workingDir);
             }
-            command.add("-jar");
-            command.add(jar);
+        }
+        command.add("-jar");
+        command.add(jar);
+
+        // Hytale server arguments (--assets, --auth-mode, --transport, etc.)
+        if (serverArgs != null && !serverArgs.isEmpty()) {
+            command.addAll(serverArgs);
+        } else {
+            // Default Hytale server arguments
+            command.add("--assets");
+            command.add("Assets.zip");
+            command.add("--auth-mode");
+            command.add("insecure");
+            command.add("--transport");
+            command.add("QUIC");
         }
 
         LOGGER.info("Spawning server '{}' in {}", serverId, workingDir);
@@ -135,9 +143,6 @@ public class ProcessManager {
         Map<String, String> env = builder.environment();
         env.put("NUMDRASSL_SERVER_ID", serverId);
         env.put("MEMORY", memory);
-        if (serverJar != null) {
-            env.put("SERVER_JAR", serverJar);
-        }
         env.putAll(environment);
 
         // Start process
@@ -158,6 +163,21 @@ public class ProcessManager {
 
         LOGGER.info("Server '{}' started with PID {}", serverId, process.pid());
         return managed;
+    }
+
+    /**
+     * Spawn a server process (legacy method without server args).
+     */
+    @Nonnull
+    public ManagedProcess spawnServer(
+            @Nonnull String serverId,
+            @Nonnull Path workingDir,
+            @Nonnull String memory,
+            @Nullable String serverJar,
+            @Nonnull List<String> jvmArgs,
+            @Nonnull Map<String, String> environment,
+            boolean isDynamic) throws IOException {
+        return spawnServer(serverId, workingDir, memory, serverJar, jvmArgs, List.of(), environment, isDynamic);
     }
 
     /**

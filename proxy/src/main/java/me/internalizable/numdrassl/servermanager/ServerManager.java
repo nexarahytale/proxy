@@ -173,7 +173,8 @@ public class ServerManager {
 
             if (staticConfig.isAlwaysOn()) {
                 LOGGER.info("Starting static server: {}", serverId);
-                startStaticServer(serverId).exceptionally(e -> {
+                // Use internal method that doesn't check initialized flag
+                startStaticServerInternal(serverId, staticConfig).exceptionally(e -> {
                     LOGGER.error("Failed to start static server '{}': {}", serverId, e.getMessage());
                     return null;
                 });
@@ -203,6 +204,14 @@ public class ServerManager {
                     new IllegalArgumentException("Static server not configured: " + serverId));
         }
 
+        return startStaticServerInternal(serverId, staticConfig);
+    }
+
+    /**
+     * Internal method to start a static server (used during initialization).
+     */
+    private CompletableFuture<ServerInstance> startStaticServerInternal(
+            String serverId, ServerManagerConfig.StaticServerConfig staticConfig) {
         return instanceManager.startStaticServer(serverId, staticConfig)
                 .thenApply(instance -> {
                     registry.register(instance);

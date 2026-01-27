@@ -1,0 +1,23 @@
+{
+  "Version": 3,
+  "ServerName": "Bedwars Arena",
+  "MOTD": "Bedwars Match",
+  "Password": "",
+  "MaxPlayers": 16,
+  "MaxViewRadius": 16,
+  "Defaults": {
+    "World": "bedwars_arena",
+    "GameMode": "Adventure"
+  },
+  "ConnectionTimeouts": {
+    "JoinTimeouts": {}
+  },
+  "RateLimit": {},
+  "Modules": {},
+  "LogLevels": {},
+  "Mods": {},
+  "DisplayTmpTagsInStrings": false,
+  "PlayerStorage": {
+    "Type": "Hytale"
+  }
+}

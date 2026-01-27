@@ -11,7 +11,9 @@ import java.io.InputStream;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -28,12 +30,14 @@ public class TemplateMetadata {
     private int maxPlayers = 16;
     private String memoryAllocation = "2G";
     private boolean worldResetOnShutdown = true;
-    private String pluginLoader = "plugins/NumdrasslBridge.jar";
+    private String pluginLoader = "plugins/bridge-1.0-SNAPSHOT.jar";
     private String startupCommand = "./startup.sh";
     private int gracefulShutdownTimeout = 30;
     private Map<String, Double> respawnLocation = new HashMap<>();
-    private String serverJar;
-    private Map<String, String> serverProperties = new HashMap<>();
+    private String serverJar = "HytaleServer.jar";
+    
+    // Hytale-specific startup arguments (--assets, --auth-mode, --transport, --bind)
+    private List<String> startupArgs = new ArrayList<>();
 
     public TemplateMetadata() {
         respawnLocation.put("x", 0.0);
@@ -174,13 +178,17 @@ public class TemplateMetadata {
         this.serverJar = serverJar;
     }
 
+    /**
+     * Get Hytale server startup arguments.
+     * @return startup arguments list
+     */
     @Nonnull
-    public Map<String, String> getServerProperties() {
-        return serverProperties;
+    public List<String> getStartupArgs() {
+        return startupArgs;
     }
 
-    public void setServerProperties(Map<String, String> serverProperties) {
-        this.serverProperties = serverProperties;
+    public void setStartupArgs(List<String> startupArgs) {
+        this.startupArgs = startupArgs != null ? startupArgs : new ArrayList<>();
     }
 
     /**

@@ -33,9 +33,9 @@ public class ServerManagerConfig {
     private int processStartTimeoutSeconds = 60;
 
     public ServerManagerConfig() {
-        // Default static server
+        // Default static server (Hytale default port is 5520)
         StaticServerConfig lobby = new StaticServerConfig();
-        lobby.setPort(6000);
+        lobby.setPort(5520);
         lobby.setMaxPlayers(100);
         lobby.setAlwaysOn(true);
         lobby.setWorldFolder("servers/static/lobby");
@@ -45,8 +45,8 @@ public class ServerManagerConfig {
         TemplateConfig bedwars = new TemplateConfig();
         bedwars.setDisplayName("Bedwars");
         bedwars.setMaxPlayers(16);
-        bedwars.setPortRangeStart(6100);
-        bedwars.setPortRangeEnd(6200);
+        bedwars.setPortRangeStart(5521);
+        bedwars.setPortRangeEnd(5600);
         bedwars.setMemory("2G");
         bedwars.setWorldReset(true);
         bedwars.setAutoCleanupDelaySeconds(300);
@@ -160,12 +160,13 @@ public class ServerManagerConfig {
      * Configuration for a static (persistent) server.
      */
     public static class StaticServerConfig {
-        private int port = 6000;
+        private int port = 5520;  // Hytale default port
         private int maxPlayers = 100;
         private boolean alwaysOn = true;
         private String worldFolder;
         private String memory = "2G";
         private List<String> jvmArgs = new ArrayList<>();
+        private List<String> serverArgs = new ArrayList<>();  // Hytale server arguments (--assets, --auth-mode, etc.)
         private Map<String, String> environment = new HashMap<>();
 
         public int getPort() {
@@ -216,6 +217,14 @@ public class ServerManagerConfig {
             this.jvmArgs = jvmArgs;
         }
 
+        public List<String> getServerArgs() {
+            return serverArgs;
+        }
+
+        public void setServerArgs(List<String> serverArgs) {
+            this.serverArgs = serverArgs;
+        }
+
         public Map<String, String> getEnvironment() {
             return environment;
         }
@@ -231,8 +240,8 @@ public class ServerManagerConfig {
     public static class TemplateConfig {
         private String displayName;
         private int maxPlayers = 16;
-        private int portRangeStart = 6100;
-        private int portRangeEnd = 6500;
+        private int portRangeStart = 5521;  // Hytale ports start after 5520
+        private int portRangeEnd = 5700;
         private String memory = "2G";
         private boolean worldReset = true;
         private int autoCleanupDelaySeconds = 300;
@@ -367,10 +376,10 @@ public class ServerManagerConfig {
      * Configuration for port allocation.
      */
     public static class PortAllocationConfig {
-        private int staticRangeStart = 6000;
-        private int staticRangeEnd = 6050;
-        private int dynamicRangeStart = 6100;
-        private int dynamicRangeEnd = 6500;
+        private int staticRangeStart = 5520;  // Hytale default port
+        private int staticRangeEnd = 5520;
+        private int dynamicRangeStart = 5521;
+        private int dynamicRangeEnd = 5700;
 
         public int getStaticRangeStart() {
             return staticRangeStart;

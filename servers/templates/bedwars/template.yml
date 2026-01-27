@@ -1,29 +1,21 @@
 # Bedwars Server Template
-# Dynamic minigame server template
-
 name: Bedwars
 type: minigame
 serverIdPrefix: bedwars
 maxPlayers: 16
 memoryAllocation: 2G
 worldResetOnShutdown: true
-pluginLoader: plugins/NumdrasslBridge.jar
-startupCommand: ./startup.sh
 gracefulShutdownTimeout: 30
+autoCleanupDelaySeconds: 300
 
-# Spawn location for players
-respawnLocation:
-  x: 0.0
-  y: 100.0
-  z: 0.0
+# Hytale server JAR
+serverJar: HytaleServer.jar
 
-# Server JAR (relative to template directory)
-serverJar: server.jar
-
-# Default server properties
-serverProperties:
-  server-name: Bedwars Arena
-  max-players: "16"
-  online-mode: "false"
-  pvp: "true"
-  difficulty: "normal"
+# Startup arguments for Hytale server
+startupArgs:
+  - "--assets"
+  - "Assets.zip"
+  - "--auth-mode"
+  - "insecure"
+  - "--transport"
+  - "QUIC"
